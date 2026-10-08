@@ -1,0 +1,18 @@
+# ---------------------------------------------------------------- secrets
+# WiFi password, bot token and chat id live here. Never commit.
+_secrets/secrets.h
+**/secrets.h
+!**/secrets.example.h
+
+# ------------------------------------------------- PlatformIO build output
+# firmware.bin / .elf / .o contain the compiled-in secrets (strings from
+# secrets.h end up in the image), so the whole build tree stays out of git.
+.pio/
+**/.pio/
+
+# ------------------------------------------------------------ editor noise
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
