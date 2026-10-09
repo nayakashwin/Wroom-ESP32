@@ -1,6 +1,6 @@
 # ESP32 projects — NodeMCU ESP-32S (ESP-WROOM-32)
 
-Eight PlatformIO projects that build up from "connect to WiFi" to "read BLE
+Nine PlatformIO projects that build up from "connect to WiFi" to "read BLE
 temperature sensors and answer questions in Telegram". Each numbered folder is
 a complete, self-contained firmware; later projects reuse earlier ones.
 
@@ -56,7 +56,8 @@ Fill in four values:
 | `BOT_TOKEN` | 02, 03, 04, 06, 08 | Telegram → message **@BotFather** → `/newbot` → it replies with `123456789:AA...` |
 | `CHAT_ID` | 02, 04, 06, 08 | send your new bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser — your id is under `message` → `chat` → `id`. For a group/channel use the negative id, or the `@channelusername` |
 
-`05GPIO` and `07BlueToothTempSensor` need no secrets at all.
+`05GPIO`, `07BlueToothTempSensor` and `09ESP2ESPCommunication` need no secrets
+at all.
 
 How it is wired up (so you can copy the pattern into a new project):
 
@@ -104,6 +105,7 @@ itself and the boot banner appears on the monitor.
 | `06GPIOTelegram` | + `BOT_TOKEN`, `CHAT_ID` | drive the GPIOs from Telegram *or* the serial console; only the `CHAT_ID` owner may. |
 | `07BlueToothTempSensor` | — | BLE BTHome reader for three **LYWSD03MMC** thermometers (ATC firmware), prints temperature / humidity / battery every 5 s. |
 | `08BlueToothTelegram` | + `BOT_TOKEN`, `CHAT_ID` | 07 plus Telegram: typing `/temp` (in Telegram or on the serial console) replies with the sensor grid; LED heartbeat + task watchdog. |
+| `09ESP2ESPCommunication` | — | encrypted point-to-point ESP-NOW link between **two ESP32s** (same firmware both): auto-pairing with a shared key, AES-CCM-128 encrypted, reliable bitmap-ACK transfer ≈ 1 Mbit/s, serial CLI (`tx`/`ping`/`msg`/`key`), full customization docs in its README. |
 
 Sensor MACs and labels for 07/08 are in each project's `src/main.cpp`
 (`kSensors[]`) — edit them to match the thermometers you own.
@@ -134,4 +136,5 @@ _shared/                build/flash/monitor reference (machine-wide)
 _secrets/secrets.h              YOUR secrets - never committed
 _secrets/secrets.example.h      committed template + instructions
 01Wifi … 08BlueToothTelegram/   the projects
+09ESP2ESPCommunication/         two-board encrypted ESP-NOW link
 ```
