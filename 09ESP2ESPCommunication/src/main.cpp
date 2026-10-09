@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
+#include <esp_wifi.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +28,7 @@
 
 static const uint32_t BAUD       = 115200;
 static const size_t   CMDBUF_MAX = 256;
+static const uint32_t WDT_TIMEOUT_S = 8;   // loop() never blocks > ~0.5 s
 
 static char   line[CMDBUF_MAX];
 static size_t lineLen = 0;
@@ -132,6 +135,22 @@ static void autoBench() {
 #endif
 }
 
+// ------------------------------------------------------------------- rate
+struct RateName { const char* n; uint8_t v; };
+static const RateName kRates[] = {
+  {"1m",  WIFI_PHY_RATE_1M_L},  {"2m",  WIFI_PHY_RATE_2M_L},
+  {"5m5", WIFI_PHY_RATE_5M_L},  {"11m", WIFI_PHY_RATE_11M_L},
+  {"6m",  WIFI_PHY_RATE_6M},    {"9m",  WIFI_PHY_RATE_9M},
+  {"12m", WIFI_PHY_RATE_12M},   {"18m", WIFI_PHY_RATE_18M},
+  {"24m", WIFI_PHY_RATE_24M},   {"36m", WIFI_PHY_RATE_36M},
+  {"48m", WIFI_PHY_RATE_48M},   {"54m", WIFI_PHY_RATE_54M},
+  {"mcs0", WIFI_PHY_RATE_MCS0_LGI}, {"mcs1", WIFI_PHY_RATE_MCS1_LGI},
+  {"mcs2", WIFI_PHY_RATE_MCS2_LGI}, {"mcs3", WIFI_PHY_RATE_MCS3_LGI},
+  {"mcs4", WIFI_PHY_RATE_MCS4_LGI}, {"mcs5", WIFI_PHY_RATE_MCS5_LGI},
+  {"mcs6", WIFI_PHY_RATE_MCS6_LGI}, {"mcs7", WIFI_PHY_RATE_MCS7_LGI},
+  {"mcs7s", WIFI_PHY_RATE_MCS7_SGI},
+};
+
 // ------------------------------------------------------------------- cli
 static bool ciEq(const char* a, const char* b) {
   while (*a && *b) {
@@ -141,6 +160,25 @@ static bool ciEq(const char* a, const char* b) {
     a++; b++;
   }
   return *a == 0 && *b == 0;
+}
+
+static void cmdRate(char* a) {
+  if (!a || !*a) {
+    Serial.printf("ok: rate=%u - names:", (unsigned)e2e::phyRate());
+    for (const RateName& r : kRates) Serial.printf(" %s", r.n);
+    Serial.println("\n     lower = more range/interference margin, throughput stays ~equal");
+    return;
+  }
+  for (const RateName& r : kRates) {
+    if (ciEq(a, r.n)) {
+      if (e2e::setPhyRate(r.v, true))
+        Serial.printf("ok: phy rate %s (%u) applied and saved (survives reboot)\n", r.n, (unsigned)r.v);
+      else
+        Serial.println("ERR: esp_wifi_config_espnow_rate refused this rate");
+      return;
+    }
+  }
+  Serial.println("ERR: unknown rate - 'rate' with no argument lists valid names");
 }
 
 static uint32_t takeNum(char* s, uint32_t def, uint32_t lo, uint32_t hi) {
@@ -158,6 +196,7 @@ static void cmdHelp() {
   Serial.println("  stop            abort the running stream");
   Serial.println("  ping [n]        round-trip latency, n pings (default 5, max 50)");
   Serial.println("  msg <text>      send text reliably to the peer (chunked if long)");
+  Serial.println("  rate [name]     PHY rate (range vs speed); no arg = list names");
   Serial.println("  key <psk>       set the pre-shared key (8..63 chars), save + reboot");
   Serial.println("  help            this list");
 }
@@ -166,10 +205,11 @@ static void cmdStatus() {
   uint8_t peer[6]; e2e::peerMac(peer);
   char mac[18];
   snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", peer[0], peer[1], peer[2], peer[3], peer[4], peer[5]);
-  Serial.printf("ok: link %s peer=%s fp=%08lX ch=%d frame<=%u payload<=%u\n",
+  Serial.printf("ok: link %s peer=%s fp=%08lX ch=%d frame<=%u payload<=%u rate=%u\n",
                 e2e::paired() ? "UP" : "DOWN", e2e::paired() ? mac : "-",
                 (unsigned long)e2e::keyFingerprint(), E2E_CHANNEL,
-                (unsigned)E2E_FRAME_MAX, (unsigned)e2e::payloadMax());
+                (unsigned)E2E_FRAME_MAX, (unsigned)e2e::payloadMax(),
+                (unsigned)e2e::phyRate());
   Serial.printf("ok: psk source=%s, linkUps=%lu txDone=%lu rxFrames=%lu macFail=%lu sendErr=%lu rxOverflow=%lu msgDrop=%lu\n",
                 e2e::pskSource(), (unsigned long)e2e::linkUpCount(),
                 (unsigned long)e2e::txDoneCount(), (unsigned long)e2e::rxTotalFrames(),
@@ -177,15 +217,17 @@ static void cmdStatus() {
                 (unsigned long)e2e::rxOverflowCount(), (unsigned long)e2e::msgDroppedCount());
   const e2e::TxReport& t = e2e::lastTx();
   const e2e::RxReport& r = e2e::lastRx();
-  Serial.printf("ok: last tx: s=%u acked=%lu/%lu retx=%lu %s\n",
+  Serial.printf("ok: last tx: s=%u acked=%lu/%lu retx=%lu %s%s\n",
                 t.stream, (unsigned long)t.acked, (unsigned long)t.frames,
-                (unsigned long)t.retx, t.ok ? "ok" : "incomplete");
+                (unsigned long)t.retx, t.ok ? "ok" : "incomplete",
+                e2e::retryPending() ? " (retry pending)" : "");
   Serial.printf("ok: last rx: s=%u unique=%lu/%lu dup=%lu verify=%s\n",
                 r.stream, (unsigned long)r.unique, (unsigned long)r.frames,
                 (unsigned long)r.dup, r.verifyFails ? "FAIL" : "ok");
-  Serial.printf("ok: heap free=%u min=%u, uptime=%lu s\n",
+  Serial.printf("ok: heap free=%u min=%u, uptime=%lu s, millis-wraps=%lu\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
-                (unsigned long)(millis() / 1000));
+                (unsigned long)(millis() / 1000),
+                (unsigned long)e2e::millisWraps());
 }
 
 static void handleLine(char* buf) {
@@ -224,6 +266,10 @@ static void handleLine(char* buf) {
       Serial.printf("ok: msg queued (%u bytes, reliable)\n", (unsigned)strlen(text));
     return;
   }
+  if (ciEq(cmd, "rate")) {
+    cmdRate(strtok(NULL, " \t"));
+    return;
+  }
   if (ciEq(cmd, "key")) {
     char* psk = strtok(NULL, " \t");
     if (!psk || !*psk) { Serial.println("ERR: key needs a passphrase (8..63 chars)"); return; }
@@ -238,6 +284,16 @@ static void handleLine(char* buf) {
     ESP.restart();
     return;
   }
+
+#ifdef E2E_WDT_TEST
+  if (ciEq(cmd, "hang")) {
+    Serial.println("ok: hanging loop() for 30 s - expect a watchdog panic + reboot");
+    Serial.flush();
+    uint32_t t0 = millis();
+    while (millis() - t0 < 30000) {}   // deliberately starve the task watchdog
+    return;
+  }
+#endif
 
   Serial.printf("ERR: unknown command '%s' - type 'help'\n", cmd);
 }
@@ -275,9 +331,18 @@ void setup() {
                 ok ? "" : " INIT FAILED");
   Serial.println("waiting for peer (both boards: same channel, same key) - type 'help'");
   e2e::onMessage(onMsg);
+
+  // ruggedization: if loop() ever hangs (radio driver, stuck print, ...), the
+  // task watchdog panics and reboots the board instead of silent death.
+  // init may return 0x105 INVALID_STATE: startup already armed it with 5 s.
+  esp_err_t wInit = esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_err_t wAdd  = esp_task_wdt_add(nullptr);  // setup()/loop() task
+  Serial.printf("wdt: armed (init rc=%d, add rc=%d) - a hung loop() reboots the board\n",
+                (int)wInit, (int)wAdd);
 }
 
 void loop() {
+  esp_task_wdt_reset();  // ... and prove it to the task watchdog
   e2e::poll();
   pollSerial();
   pingMachine();

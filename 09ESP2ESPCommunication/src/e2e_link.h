@@ -117,6 +117,13 @@ bool sendBlob(const uint8_t* data, uint16_t len);
 // Fire one ping (8-byte frame); result via pingStats().
 bool sendPing();
 
+// Runtime PHY rate (wifi_phy_rate_t value, 0x00..0x2A). Applies immediately,
+// optionally persisted to NVS and used instead of E2E_PHY_RATE after reboot.
+// Lower rates survive interference/distance better; throughput is nearly
+// rate-independent on this driver (see README section 7).
+bool     setPhyRate(uint8_t rateEnum, bool persist);
+uint8_t  phyRate();
+
 // Built-in deterministic bench payload generator (verified on receive).
 // ctx must point at a uint16_t holding the payload length to send.
 uint16_t benchGen(void* ctx, uint32_t seq, uint8_t* out, uint16_t maxLen);
@@ -130,6 +137,8 @@ void         resetPingStats();
 // Debug helpers used by the `status` command.
 uint32_t keyFingerprint();   // FNV-1a of the derived LMK (identity check)
 const char* pskSource();     // "nvs" or the compile-time default
+uint32_t millisWraps();      // 49.7-day millis() rollovers seen (logged too)
+bool     retryPending();     // a failed stream is waiting for the link to return
 uint32_t linkUpCount();
 uint32_t txDoneCount();      // finished sender sessions (ok or aborted)
 uint32_t rxTotalFrames();    // all valid session frames ever received

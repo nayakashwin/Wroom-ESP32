@@ -14,8 +14,28 @@ Edit that file for shared rules — never duplicate them here.
 - Firmware: **same image on both boards.** Encrypted (AES-CCM-128 via ESP-NOW
   LMK) point-to-point link with a 64-frame bitmap-ARQ reliable-transfer engine
   on top. Serial CLI: `help | status | tx [KB] | stop | ping [n] | msg <text>
-  | key <psk>`. Auto-runs a 128 KB benchmark on first pairing (higher-MAC
-  board sends). Full docs: `README.md` in this folder.
+  | rate [name] | key <psk>`. Auto-runs a 128 KB benchmark on first pairing
+  (higher-MAC board sends). Full docs: `README.md` in this folder.
+
+### Ruggedization features (2026-10-09)
+
+- **Task watchdog** on loop() (8 s, panic→reboot); boot prints
+  `wdt: armed (init rc=0, add rc=0)`. Verified with the `hang` command of a
+  `-D E2E_WDT_TEST` build (not in default builds) → `task_wdt: loopTask` →
+  `abort()` → reboot → re-pair.
+- **Mid-stream receiver reboot recovery**: every bitmap ACK is taken as the
+  receiver's current truth; a peer that rejoins with an empty window pulls the
+  sender's window back and the stream *completes* (verified: 4 MB stream
+  survived a receiver reboot, retx ≈ missed frames, verify=ok).
+- **Session auto-retry**: a stream that still dies is restarted up to 2×
+  (1 s/2 s backoff, waits ≤60 s for the peer): `TX RETRY` / `(retry n)` lines,
+  then `TX ABORT … retries exhausted` if the peer never returns. `stop` and a
+  new `tx`/`msg` cancel a pending retry. Delivery is at-least-once.
+- **millis() wrap safety**: unsigned-diff timers everywhere; the 49.7-day
+  rollover is logged and counted (`millis-wraps` in `status`).
+- **Runtime PHY rate**: `rate <name>` (1m…54m, mcs0…mcs7s) applies
+  `esp_wifi_config_espnow_rate` live, persists to NVS (`e2e`/`rate`), and
+  wins over `-D E2E_PHY_RATE` after first use.
 
 ### Two-board workflow
 
@@ -72,6 +92,21 @@ the other.
 - RX window is safe by construction: the sender never transmits past
   `ackBase+63`, so the receiver can never see a frame ≥ `base+64` (that path
   only increments `rxOverflowCount()`, which should stay 0).
+- **Treat every ACK as current truth — never as "stale".** An earlier version
+  only accepted ACKs whose acked-count was ≥ the sender's, which deadlocked
+  when the receiver (re)joined mid-stream with an empty window: its honest
+  base=0/got=0 ACKs were discarded, the sender stalled at its old window
+  (observed: 76% stall, `superseded after 0/N frames` at the rx), and only the
+  5 s abort + full retry recovered. The rewind fix makes the *same* stream
+  survive the reboot (verified).
+- **Serial port opens can knock a board into the ROM bootloader.** pyserial's
+  `open()` asserts DTR+RTS simultaneously, which the NodeMCU auto-reset
+  circuit can read as "reset with IO0 low" → board sits in
+  `waiting for download`: no prints, no HELLOs, peer unpaired — looks exactly
+  like a firmware wedge but is not (a real loop hang gets WDT-rebooted).
+  Recipe: after every `open()`, immediately `setDTR(False); setRTS(False)`;
+  to recover/reset, pulse **EN only** (`setRTS(True)` 0.12 s → `False`, DTR
+  released the whole time — pulsing DTR too enters the bootloader).
 
 ## Verification status (2026-10-09)
 
@@ -114,3 +149,49 @@ Soak harness note: its "re-pair TIMEOUT" labels are a checker artifact — it
 waits for a new `LINK up` on *both* boards, but the surviving board keeps the
 link up when the peer returns within 3 s, so it never re-prints one. Trust the
 per-cycle traffic deltas (and this note) over that flag.
+
+### Ruggedization verification (2026-10-09, after the soak)
+
+- WDT: `hang` (E2E_WDT_TEST build) → `task_wdt: loopTask` panic → `abort()` →
+  reboot → re-pair within ~2 s. Default build prints `wdt: armed (init rc=0,
+  add rc=0)` and shows no spurious resets during benches/pings/rate changes.
+- `rate`: `rate 11m` → applied, `ping 3/3 ok` (rtt 2–3 ms), `status rate=3`,
+  survives reboot (`rate=12(nvs)` banner); restored to 54m.
+- Mid-stream receiver kill (post ACK-merge fix): 4 MB `tx 4096`, receiver
+  rebooted at ~2 200 frames → sender rewound and **completed the same
+  session**: `TX DONE s=1 acked=18079/18079 retx=4142` (≈ the missed frames)
+  and `RX DONE frames=18079/18079 verify=ok` — no abort, no retry needed.
+- Auto-retry (pre-fix run): `TX RETRY s=1 … retry 1/2 when the link returns`
+  → `(retry 1)` … retry 2 … `TX DONE s=3 acked=18079/18079 rate=1.58Mbps`
+  after two aborts; exhausted-retry path code-reviewed (60 s give-up print).
+
+### 2-hour continuous-traffic soak (2026-10-09, `/tmp/opencode/soak2.py`)
+
+Voice-like profile: both boards stream back-to-back 256 KB encrypted segments
+**in both directions simultaneously for the full 2 h** (full-duplex), with
+`ping 3` every 30 s under load, `msg` every 45 s, `status` every 60 s, and one
+planned mid-traffic reboot each (B @ t=2400 s, A @ t=4800 s). Results:
+
+- **4587/4587 segments completed with acked==frames** (A 2348 / B 2239,
+  1202 MB total), **0 aborts, 0 incomplete sessions, 0 linkdowns, 0
+  watchdog/panic lines, 0 bootloader entries**.
+- Sustained goodput ≈ **0.68 / 0.65 Mbps per direction** (aggregate ~1.34
+  Mbps full-duplex), segment rates 0.37–1.88 Mbps.
+- Pings 239/239 answered *under saturation*: RTT min/avg/max = 1/25/85 ms.
+- Both mid-traffic reboots absorbed **without a single TX RETRY line**: the
+  peer's active segment completed via ACK-rewind (worst segment `retx=1169`
+  ≈ the ~2.5 s of frames missed), traffic never paused.
+- Heap drift over 2 h: A 0 B, B −212 B — no leak. `msgDrop=0`,
+  `rxOverflow` 10/0, `macFail` 9/73, `sendErr` 328/265 (all expected
+  saturation noise).
+- `msg` under full saturation: 55/55 accepted messages delivered; the other
+  261 hits were CLI `ERR: busy` (one TX session at a time — harness artifact,
+  not loss). `ping` never busy-fails → use it as the always-available control
+  channel. Each board also shows a benign double-reset at harness startup
+  (port-open + EN pulse before traffic); during the 2 h, boots were exactly
+  the 2 planned ones.
+
+Voice verdict: 64 kbps codec voice needs 0.064 Mbps/direction — ~10× headroom
+against sustained full-duplex load, RTT worst case 85 ms (voice budget 150 ms).
+Harness: safe serial discipline (`setDTR/RTS(False)` after open, EN-only
+pulses) → 0 bootloader traps across the whole run.

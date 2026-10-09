@@ -61,6 +61,7 @@ Disable the auto-benchmark with `-D E2E_AUTO_BENCH=0` (see §5).
 | `stop` | abort the running stream |
 | `ping [n]` | round-trip latency, n pings (default 5, max 50) |
 | `msg <text>` | send text to the peer **reliably** (auto-chunked if > 232 bytes) |
+| `rate [name]` | PHY rate at runtime (`1m`…`54m`, `mcs0`…`mcs7s`), saved to NVS; no arg = list |
 | `key <psk>` | set a new pre-shared key (8–63 chars), stores it in NVS and reboots — run the *same* command on both boards |
 
 LED (GPIO2): blink 1 Hz = waiting for peer, solid = link up,
@@ -101,9 +102,23 @@ T_PING / T_PONG ── encrypted unicast ──> RTT measurement
   ≤ 8 ms / 32 frames while a stream is active (and for 2 s after completion, so
   a lost final ACK still gets re-answered). The sender never transmits past
   `ackBase+63`, retransmits gaps after 50 ms, and only keeps 8 attempts in the
-  MAC queue (deeper queues measured as pure duplicate storms). A stream ends
-  when every frame is ACKed (`TX DONE … acked=n/n`) or aborts after 5 s without
-  progress.
+  MAC queue (deeper queues measured as pure duplicate storms). Every ACK is
+  taken as the receiver's *current* truth — a peer that rebooted mid-stream
+  reports an empty window, the sender rewinds and retransmits, and the stream
+  completes without restarting (verified: 4 MB stream survived a receiver
+  reboot, ~4 100 retransmits, `verify=ok`). Delivery is therefore
+  **at-least-once**. A stream ends when every frame is ACKed (`TX DONE …
+  acked=n/n`) or aborts after 5 s without progress.
+
+### Ruggedization (all verified on the bench)
+
+| mechanism | behaviour |
+|---|---|
+| task watchdog | `loop()` subscribed with an 8 s timeout; a hang panics and reboots the board (`wdt: armed` at boot, proven with a deliberate hang test → `task_wdt: loopTask` → `abort()` → clean reboot) |
+| mid-stream peer reboot | sender rewinds its window to the receiver's state and completes the stream (see above) |
+| session auto-retry | if a stream still dies (link lost / no ACK progress), it is restarted automatically up to 2× (1 s, 2 s backoff), waiting up to 60 s for the peer to return; then `TX ABORT … retries exhausted` |
+| wrap-safe timers | all intervals use unsigned difference arithmetic; the 49.7-day `millis()` rollover is logged and counted (`millis-wraps` in `status`) |
+| runtime rate adaptation | `rate <name>` changes the PHY rate without reflashing and persists it in NVS — drop to `11m`/`2m` when interference or distance degrades the link |
 - **Framing.** 18-byte header + payload, ≤ 250 bytes per ESP-NOW frame
   (`payload ≤ 232`). Multi-frame streams are how bigger data is carried.
 - **Supervision.** Any frame from the peer refreshes a 3 s timer; HELLOs
@@ -188,6 +203,7 @@ Reassemble on the peer exactly like `main.cpp`'s `onMsg()` does
 | both directions simultaneously | supported (each board has its own TX and RX state) |
 | `PayloadGen` must be deterministic | retransmissions regenerate the payload from `seq` |
 | receiver gets each frame once | bitmap dedup; your handler sees no duplicates |
+| delivery semantics | **at-least-once**: a mid-stream rewind or an auto-retried stream (new stream id) can redeliver frames the app already saw — dedup by content/seq in the handler if that matters |
 | frame type | `T_TEXT` for app data (no built-in verification); `T_DATA` only if you reuse the bench pattern |
 | TEXT handler throughput | chunks are handed to `onMessage` via a 16-slot FIFO; if your handler is slow, surplus chunks are counted in `msgDroppedCount()` |
 
@@ -198,7 +214,7 @@ Reassemble on the peer exactly like `main.cpp`'s `onMsg()` does
 | `E2E_CHANNEL` | `6` | WiFi channel 1–13; **must match on both boards**. Pick a quiet one. |
 | `E2E_FRAME_MAX` | `250` | frame size incl. header, ≤ 250 (ESP-NOW v1 hard limit) |
 | `E2E_PSK` | `"esp32-ptp-default-key-CHANGE-ME"` | passphrase; prefer the `key` command (NVS) so it never exists in source |
-| `E2E_PHY_RATE` | `WIFI_PHY_RATE_54M` | PHY rate token. Throughput is nearly rate-independent at close range; **lower it for range** (`WIFI_PHY_RATE_11M_S`, `2M_S`, `1M_L`). |
+| `E2E_PHY_RATE` | `WIFI_PHY_RATE_54M` | PHY rate token — or skip it and use the runtime `rate` command (NVS-persisted, wins over the build flag after first use) |
 | `E2E_AUTO_BENCH` | `1` | run the 128 KB demo benchmark once after pairing |
 | `E2E_AUTO_BENCH_KB` | `128` | size of that benchmark |
 
@@ -237,8 +253,9 @@ and re-run `tx 512` on both boards to compare.
   is clean, lower `kAckPeriodMs` on lossy links for faster gap recovery.
 - Latency of a single small message ≈ one driver round trip ≈ 2–9 ms; the
   64-frame window keeps full throughput over that RTT.
-- Boards far apart / marginal RSSI: lower `E2E_PHY_RATE`, expect `retx`/`mac`
-  to climb — throughput degrades gracefully, delivery does not.
+- Boards far apart / marginal RSSI: lower the PHY rate — at runtime with
+  `rate 11m` (or `2m`), no reflash needed — and expect `retx`/`mac` to climb:
+  throughput degrades gracefully, delivery does not.
 
 ## 8. Troubleshooting
 

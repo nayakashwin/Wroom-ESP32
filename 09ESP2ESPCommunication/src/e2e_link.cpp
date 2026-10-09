@@ -65,20 +65,32 @@ const uint32_t kRetxMinMs    = 50;     // min spacing between attempts of a fram
 const uint32_t kAbortMs      = 5000;   // no ack progress -> give up
 const uint32_t kGraceMs      = 2000;   // keep acking after a completed stream
 const uint32_t kPingTimeoutMs = 500;
-const uint32_t kWindow       = 64;     // arq window (one uint64 bitmap)
-const uint32_t kInFlightMax  = 8;      // attempts handed to esp_now_send at once:
-                                       // the wifi mac serialises them, deeper
-                                       // queues only add latency and premature
-                                       // retransmits (measured dup storm)
+const uint32_t kWindow       = 64;    // arq window (one uint64 bitmap)
+const uint32_t kInFlightMax  = 8;     // attempts handed to esp_now_send at once:
+                                      // the wifi mac serialises them, deeper
+                                      // queues only add latency and premature
+                                      // retransmits (measured dup storm)
+const uint8_t  kMaxSessionRetries = 2;      // auto-restart of failed streams
+const uint32_t kRetryGiveUpMs = 60000;      // wait this long for the peer
+const uint8_t  kRateMax      = 0x2A;  // WIFI_PHY_RATE_MAX-1 (wifi_phy_rate_t)
 
 // --------------------------------------------------------------- send state
 struct TxState {
-  bool active; uint8_t type; uint16_t stream;
+  bool active; uint8_t type; uint8_t retries; uint16_t stream;
   uint32_t total, next, ackBase, acked;
   uint64_t ackGot;
   PayloadGen gen; void* ctx;
   uint32_t retx, bytes, firstBytes, startMs, lastProgressMs, lastAckMs, lastPrintMs;
   uint32_t lastTry[kWindow]; uint8_t attempts[kWindow];
+  char name[10];
+};
+
+// a session that died from a lost/interfered link, waiting to be restarted
+// (fresh stream id, payload regenerated from seq 0 => at-least-once delivery)
+struct TxRetry {
+  bool pending; uint8_t attempt; uint8_t type;
+  PayloadGen gen; void* ctx; uint32_t frames;
+  uint32_t dueMs, scheduledMs;
   char name[10];
 };
 
@@ -131,9 +143,13 @@ RxState g_rx;
 bool g_rxStartPrint = false;
 RxReport g_rxLast, g_rxDrop; bool g_rxDropNew = false;
 TxState g_tx;
+TxRetry g_txRetry;
 TxReport g_txLast;
 MessageHandler g_msgH = nullptr;
 PingStats g_ping;
+uint8_t  g_curRate = (uint8_t)E2E_PHY_RATE;
+const char* g_rateSource = E2E_XSTR(E2E_PHY_RATE);
+uint32_t g_lastMillis = 0, g_millisWraps = 0;
 
 char* macStr(const uint8_t m[6], char out[18]) {
   snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
@@ -342,6 +358,26 @@ void finishTx(uint32_t now, bool ok, const char* reason) {
   g_txLast.retx = g_tx.retx; g_txLast.macFail = macFail;
   g_txLast.bytes = g_tx.bytes; g_txLast.ms = now - g_tx.startMs; g_txLast.ok = ok;
   g_tx.active = false;
+
+  // a stream that died because the link dropped or went deaf is restarted
+  // (up to kMaxSessionRetries times) as soon as the peer is back
+  bool retryable = !ok && reason &&
+                   (!strcmp(reason, "no ack progress") || !strcmp(reason, "link lost"));
+  if (retryable && g_tx.retries < kMaxSessionRetries) {
+    g_txRetry.pending = true;
+    g_txRetry.attempt = g_tx.retries + 1;
+    g_txRetry.type = g_tx.type; g_txRetry.gen = g_tx.gen; g_txRetry.ctx = g_tx.ctx;
+    g_txRetry.frames = g_tx.total;
+    g_txRetry.dueMs = now + (1000u << g_tx.retries);   // 1 s, then 2 s backoff
+    g_txRetry.scheduledMs = now;
+    strncpy(g_txRetry.name, g_tx.name, sizeof g_txRetry.name - 1);
+    Serial.printf("TX RETRY s=%u %s %lu/%lu (%s) - retry %u/%u when the link returns\n",
+                  g_txLast.stream, g_txRetry.name, (unsigned long)g_txLast.acked,
+                  (unsigned long)g_txLast.frames, reason,
+                  (unsigned)(g_tx.retries + 1), (unsigned)kMaxSessionRetries);
+    return;
+  }
+
   g_txDone++;
   if (ok) {
     double mbps = g_txLast.ms ? (g_txLast.bytes * 8.0) / (g_txLast.ms * 1000.0) : 0.0;
@@ -367,12 +403,15 @@ void txEngine(uint32_t now) {
   portEXIT_CRITICAL(&g_mux);
 
   if (newAck && am.stream == g_tx.stream) {
+    // Accept every ack for the active stream as the receiver's current truth.
+    // A receiver that (re)joined mid-stream reports base=0/got=0; treating
+    // that as "stale" deadlocks the sender at its old window (measured: stall
+    // at 76% until abort). Rare reordered duplicate acks rewind the window
+    // for one 8 ms ack period - harmless, retransmits cover it.
     uint32_t ackedNew = am.base + __builtin_popcountll(am.got);
-    if (ackedNew >= g_tx.acked) {   // ignore out-of-order (stale) acks
-      if (ackedNew != g_tx.acked) g_tx.lastProgressMs = now;
-      g_tx.ackBase = am.base; g_tx.ackGot = am.got;
-      g_tx.acked = ackedNew; g_tx.lastAckMs = now;
-    }
+    if (ackedNew != g_tx.acked || am.base != g_tx.ackBase) g_tx.lastProgressMs = now;
+    g_tx.ackBase = am.base; g_tx.ackGot = am.got;
+    g_tx.acked = ackedNew; g_tx.lastAckMs = now;
   }
   if (g_tx.acked >= g_tx.total) { finishTx(now, true, nullptr); return; }
 
@@ -413,6 +452,9 @@ void txEngine(uint32_t now) {
 
 }  // namespace
 
+static bool startSessionInternal(uint8_t type, PayloadGen gen, void* ctx,
+                                 uint32_t frames, const char* name, uint8_t retries);
+
 // ------------------------------------------------------------------- api
 bool begin() {
   // read an optional runtime psk straight from nvs (Preferences::begin on a
@@ -424,6 +466,11 @@ bool begin() {
     if (nvs_get_str(h, "psk", v, &l) == ESP_OK && l > 8 && l <= sizeof g_psk) {
       memcpy(g_psk, v, l - 1 < sizeof g_psk ? l - 1 : sizeof g_psk - 1);
       g_pskSource = "nvs";
+    }
+    uint8_t rt;
+    if (nvs_get_u8(h, "rate", &rt) == ESP_OK && rt <= kRateMax) {
+      g_curRate = rt;
+      g_rateSource = "nvs";
     }
     nvs_close(h);
   }
@@ -444,19 +491,26 @@ bool begin() {
   bp.channel = 0; bp.ifidx = WIFI_IF_STA; bp.encrypt = false;
   esp_now_add_peer(&bp);
 
-  esp_err_t er = esp_wifi_config_espnow_rate(WIFI_IF_STA, E2E_PHY_RATE);
+  esp_err_t er = esp_wifi_config_espnow_rate(WIFI_IF_STA, (wifi_phy_rate_t)g_curRate);
   WiFi.macAddress(g_own);
 
-  char ms[18];
-  Serial.printf("link: esp-now ch=%d frame<=%u payload<=%u psk-fp=%08lX(%s) rate=%s rc=%d/%d\n",
+  Serial.printf("link: esp-now ch=%d frame<=%u payload<=%u psk-fp=%08lX(%s) rate=%u(%s) rc=%d/%d\n",
                 E2E_CHANNEL, (unsigned)E2E_FRAME_MAX, (unsigned)(E2E_FRAME_MAX - HDR_SIZE),
-                (unsigned long)g_fp, g_pskSource, E2E_XSTR(E2E_PHY_RATE),
+                (unsigned long)g_fp, g_pskSource, (unsigned)g_curRate, g_rateSource,
                 (int)er, (int)ec);
   return true;
 }
 
 void poll() {
   uint32_t now = millis();
+
+  // all timers use wrap-safe unsigned diffs; log the 49.7-day rollover anyway
+  if (now < g_lastMillis) {
+    g_millisWraps++;
+    Serial.printf("note: millis() wrapped after ~49.7 days (wrap #%lu, timers are wrap-safe)\n",
+                  (unsigned long)g_millisWraps);
+  }
+  g_lastMillis = now;
 
   // -- a paired peer announcing a different key invalidates the link
   bool fpBad;
@@ -621,6 +675,21 @@ void poll() {
     }
   }
 
+  // -- resume a retried session once the link is back (or give up on it)
+  if (g_txRetry.pending && !g_tx.active) {
+    if ((int32_t)(now - g_txRetry.scheduledMs) > (int32_t)kRetryGiveUpMs) {
+      g_txRetry.pending = false;
+      g_txDone++;
+      Serial.printf("TX ABORT s=%u %s - retries exhausted (peer did not return within %us)\n",
+                    g_txLast.stream, g_txRetry.name, (unsigned)(kRetryGiveUpMs / 1000));
+    } else if (g_paired && (int32_t)(now - g_txRetry.dueMs) >= 0) {
+      uint8_t attempt = g_txRetry.attempt;
+      startSessionInternal(g_txRetry.type, g_txRetry.gen, g_txRetry.ctx,
+                           g_txRetry.frames, g_txRetry.name, attempt);
+      g_txRetry.pending = false;
+    }
+  }
+
   // -- sender
   txEngine(now);
 }
@@ -638,15 +707,38 @@ uint32_t rxTotalFrames() { return g_rxTotal; }
 uint32_t sendErrCount() { return g_sendErr; }
 uint32_t rxOverflowCount() { return g_rxOverflow; }
 uint32_t msgDroppedCount() { return g_msg.dropped; }
+uint32_t millisWraps() { return g_millisWraps; }
+bool     retryPending() { return g_txRetry.pending; }
+
+bool setPhyRate(uint8_t r, bool persist) {
+  if (r > kRateMax) return false;
+  if (esp_wifi_config_espnow_rate(WIFI_IF_STA, (wifi_phy_rate_t)r) != ESP_OK) return false;
+  g_curRate = r;
+  g_rateSource = "nvs";
+  if (persist) {
+    nvs_handle_t h;
+    if (nvs_open("e2e", NVS_READWRITE, &h) == ESP_OK) {
+      nvs_set_u8(h, "rate", r);
+      nvs_commit(h);
+      nvs_close(h);
+    }
+  } else {
+    g_rateSource = "runtime";
+  }
+  return true;
+}
+
+uint8_t phyRate() { return g_curRate; }
 
 bool streamActive() { return g_tx.active; }
 
-bool startStream(uint8_t type, PayloadGen gen, void* ctx, uint32_t frames, const char* name) {
+static bool startSessionInternal(uint8_t type, PayloadGen gen, void* ctx,
+                                 uint32_t frames, const char* name, uint8_t retries) {
   if (!g_paired || g_tx.active || !gen || frames == 0) return false;
   uint32_t now = millis();
   g_tx = TxState{};
   g_tx.active = true; g_tx.type = type; g_tx.gen = gen; g_tx.ctx = ctx;
-  g_tx.total = frames;
+  g_tx.total = frames; g_tx.retries = retries;
   if (++g_streamSeq == 0) ++g_streamSeq;
   g_tx.stream = g_streamSeq;
   strncpy(g_tx.name, name ? name : "?", sizeof g_tx.name - 1);
@@ -654,12 +746,25 @@ bool startStream(uint8_t type, PayloadGen gen, void* ctx, uint32_t frames, const
   portENTER_CRITICAL(&g_mux);
   g_ackNew = false; g_macFailSession = 0;
   portEXIT_CRITICAL(&g_mux);
-  Serial.printf("TX s=%u %s frames=%lu payload<=%u\n",
-                g_tx.stream, g_tx.name, (unsigned long)frames, (unsigned)payloadCap());
+  if (retries)
+    Serial.printf("TX s=%u %s frames=%lu payload<=%u (retry %u)\n",
+                  g_tx.stream, g_tx.name, (unsigned long)frames,
+                  (unsigned)payloadCap(), (unsigned)retries);
+  else
+    Serial.printf("TX s=%u %s frames=%lu payload<=%u\n",
+                  g_tx.stream, g_tx.name, (unsigned long)frames, (unsigned)payloadCap());
   return true;
 }
 
-void stopStream(const char* reason) { finishTx(millis(), g_tx.acked >= g_tx.total, reason); }
+bool startStream(uint8_t type, PayloadGen gen, void* ctx, uint32_t frames, const char* name) {
+  g_txRetry.pending = false;   // the application takes over the radio
+  return startSessionInternal(type, gen, ctx, frames, name, 0);
+}
+
+void stopStream(const char* reason) {
+  g_txRetry.pending = false;
+  finishTx(millis(), g_tx.active && g_tx.acked >= g_tx.total, reason);
+}
 
 namespace {
 struct BlobCtx { const uint8_t* d; uint16_t len; uint16_t chunk; };
