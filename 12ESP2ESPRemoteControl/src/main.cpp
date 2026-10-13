@@ -54,10 +54,37 @@ struct __attribute__((packed)) Tele {
   uint8_t  rsv;
   uint32_t uptimeMs;      // sender uptime at capture
   uint32_t heapFree;      // sender free heap at capture
+  uint64_t pins;          // GPIO bitmask captured at the sender: bit N = GPIO N
   uint32_t crc;           // CRC32 of all preceding bytes
-  char     text[45];      // fixed label (NUL-terminated)
+  char     text[37];      // fixed label (NUL-terminated)
 };
 static_assert(sizeof(Tele) == 64, "telemetry layout drifted");
+// fail the build if the message can no longer fit a frame (see e2e_link.h)
+static_assert(sizeof(Tele) <= 250 - e2e::HDR_SIZE, "Tele outgrew the frame");
+
+// Every GPIO the ESP-WROOM-32 exposes and the app may touch. GPIO 1/3 are the
+// serial console, 6-11 are flash - neither is read. 34-39 are input-only (no
+// internal pulls: unconnected they read floating noise - tie them if you need
+// stable values). GPIO 2 is LED_BUILTIN, driven by this firmware; its bit
+// reports the LED state.
+static const uint8_t kPins[] = {
+  0, 2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22,
+  23, 25, 26, 27, 32, 33, 34, 35, 36, 39
+};
+
+static void pinSetup() {
+  for (uint8_t p : kPins) {
+    if (p == LED_BUILTIN) continue;               // driven as the LED
+    pinMode(p, p >= 34 ? INPUT : INPUT_PULLDOWN);  // unconnected pins read 0
+  }
+}
+
+static uint64_t readPins() {
+  uint64_t m = 0;
+  for (uint8_t p : kPins)
+    if (digitalRead(p)) m |= 1ULL << p;
+  return m;
+}
 
 static uint32_t crc32(const uint8_t* p, size_t n) {
   uint32_t c = 0xFFFFFFFFu;
@@ -136,20 +163,31 @@ static uint16_t teleGen(void* ctx, uint32_t seq, uint8_t* out, uint16_t maxLen) 
 }
 
 static void txMachine(uint32_t now) {
-  // completion feedback for every finished session (telemetry or `msg`)
+  // completion feedback for every finished session (telemetry or `msg`).
+  // Note: if the engine auto-retries a dead tele session, the retry
+  // regenerates from the *current* g_snap (freshest message), not the
+  // stalled one - intentional freshness semantics; the stale one is in drop.
   uint32_t done = e2e::txDoneCount();
   while (g_txDoneSeen < done) {
     g_txDoneSeen++;
+    bool wasTele = g_teleSess;
     g_teleSess = false;
     const e2e::TxReport& t = e2e::lastTx();
     if (t.ok) {
       g_txOk++; g_txRetx += t.retx; g_txMs += t.ms;
-      if (t.retx || t.ms > 500)   // normal completes are silent; margin use is not
-        Serial.printf("[tx] #%lu slow path: acked=%lu/%lu retx=%lu macfail=%lu ms=%lu\n",
-                      (unsigned long)g_txSessId, (unsigned long)t.acked,
-                      (unsigned long)t.frames,
-                      (unsigned long)t.retx, (unsigned long)t.macFail,
-                      (unsigned long)t.ms);
+      if (t.retx || t.ms > 500) {  // normal completes are silent; margin use is not
+        if (wasTele)
+          Serial.printf("[tx] #%lu slow path: acked=%lu/%lu retx=%lu macfail=%lu ms=%lu\n",
+                        (unsigned long)g_txSessId, (unsigned long)t.acked,
+                        (unsigned long)t.frames,
+                        (unsigned long)t.retx, (unsigned long)t.macFail,
+                        (unsigned long)t.ms);
+        else
+          Serial.printf("[tx] msg slow path: acked=%lu/%lu retx=%lu macfail=%lu ms=%lu\n",
+                        (unsigned long)t.acked, (unsigned long)t.frames,
+                        (unsigned long)t.retx, (unsigned long)t.macFail,
+                        (unsigned long)t.ms);
+      }
     } else {
       g_txFail++;                   // engine already printed the TX ABORT line
     }
@@ -174,6 +212,7 @@ static void txMachine(uint32_t now) {
     g_snap.copy = 0; g_snap.copies = g_copies; g_snap.rsv = 0;
     g_snap.uptimeMs = now;
     g_snap.heapFree = ESP.getFreeHeap();
+    g_snap.pins = readPins();
     g_snap.crc = 0;
     strncpy(g_snap.text, kTeleText, sizeof g_snap.text - 1);
     g_snap.text[sizeof g_snap.text - 1] = 0;
@@ -197,16 +236,67 @@ static uint32_t g_rxBase = 0;      // oldest id in the gap-accounting window
 static uint64_t g_rxWin = 0;       // bitmap: id g_rxBase+i received (engine-level)
 static bool     g_rxMaxSet = false;
 static uint32_t g_rxMax = 0;
-static uint64_t g_rxPrintedMap = 0;  // bit (id % 64): message already printed
 static uint32_t g_rxMsgs = 0, g_rxCopies = 0, g_rxDups = 0, g_rxLate = 0;
 static uint32_t g_rxGaps = 0, g_rxCrcFails = 0, g_rxFirstNot0 = 0;
 static uint32_t g_lastRxPulseMs = 0;
+static uint32_t g_lastTeleMs = 0;            // last fresh telemetry arrival
+static uint32_t g_lastSilentHintMs = 0;      // stale-silence hint rate limit
+
+// Printed-once bookkeeping: a 64-id window that slides with the stream.
+// (A bare id%64 map collides - #65 with #1, #66 with #2 ... - which the
+// 35-min soak caught: the receiver printed ids 1..64 and suppressed the
+// rest. The base moves forward, so ids only "collide" across 64-message
+// *slides*, which a sequential stream never does.)
+static uint32_t g_pBase = 0;
+static uint64_t g_pMap = 0;
+static bool     g_pValid = false;
+
+static bool alreadyPrinted(uint32_t id) {
+  if (!g_pValid) return false;
+  uint32_t d = id - g_pBase;                 // wrap-safe unsigned diff
+  return d < 64 && ((g_pMap >> d) & 1);      // older than the window: printed
+}
+
+static void markPrinted(uint32_t id) {
+  if (!g_pValid) { g_pValid = true; g_pBase = id; g_pMap = 1; return; }
+  uint32_t d = id - g_pBase;
+  if (d < 64) { g_pMap |= 1ULL << d; return; }
+  uint32_t shift = d - 63;                   // id ahead: slide the window
+  g_pMap = shift >= 64 ? 0 : (g_pMap >> shift);
+  g_pBase = id - 63;
+  g_pMap |= 1ULL << 63;
+}
 
 static void printTele(const Tele& t, bool late) {
-  Serial.printf("[rx] #%lu copy%u/%u up=%lus heap=%luB \"%s\" crc=ok%s\n",
+  static uint64_t lastPins = 0;
+  static bool     haveLast = false;
+  Serial.printf("[rx] #%lu copy%u/%u up=%lus heap=%luB pins=0x%010llX \"%s\" crc=ok%s\n",
                 (unsigned long)t.id, (unsigned)t.copy, (unsigned)t.copies,
                 (unsigned long)(t.uptimeMs / 1000), (unsigned long)t.heapFree,
-                t.text, late ? " (late)" : "");
+                (unsigned long long)t.pins, t.text, late ? " (late)" : "");
+  if (haveLast) {
+    uint64_t d = t.pins ^ lastPins;
+    if (d) {
+      uint32_t shown = 0, total = 0;
+      Serial.print("[rx] pin change:");
+      for (uint8_t p : kPins) {
+        if (d & (1ULL << p)) {
+          total++;
+          if (shown < 8) {
+            Serial.printf(" %u:%u->%u", p,
+                          (unsigned)((lastPins >> p) & 1),
+                          (unsigned)((t.pins >> p) & 1));
+            shown++;
+          }
+        }
+      }
+      if (total > shown)
+        Serial.printf(" (+%lu more)", (unsigned long)(total - shown));
+      Serial.println();
+    }
+  }
+  lastPins = t.pins;
+  haveLast = true;
 }
 
 static void printTeleDup(const Tele& t) {
@@ -218,25 +308,31 @@ static void handleTele(const Tele& t, uint32_t now) {
   g_rxCopies++;
   uint32_t id = t.id;
 
-  // sender reboot heuristic: id jumped far backwards (ids only increment)
-  if (g_rxMaxSet && id < g_rxMax && g_rxMax - id > 100000u) {
+  // LED heartbeat reflects *reception* (any valid copy), not print gating
+  g_lastRxPulseMs = now;
+
+  // sender reboot heuristic: id jumped backwards beyond possible reordering
+  // (the rx window is 64, so copies can never be more than 64 ids late - a
+  // bigger backward jump means the sender's id space restarted). The old
+  // 100000 threshold never fired in short runs; soak run 2 showed every
+  // post-reboot message miscounted as `late` instead.
+  if (g_rxMaxSet && id < g_rxMax && g_rxMax - id > 64u) {
     Serial.printf("[rx] note: id went %lu -> %lu, sender rebooted - resync window\n",
                   (unsigned long)g_rxMax, (unsigned long)id);
     g_rxMaxSet = false;
     g_rxBase = 0; g_rxWin = 0;
+    g_pValid = false;                       // printed map refers to old ids
   }
 
   // Print gate: every distinct message is printed exactly once, whenever its
   // first copy arrives - even after newer data (e.g. a message whose session
-  // completed around our own reboot). The mod-64 map is independent of the
-  // sliding window, so a late id below the window still prints, marked late.
-  uint64_t pbit = 1ULL << (id % 64);
-  if (g_rxPrintedMap & pbit) {
+  // completed around our own reboot). Sliding printed-window, see above.
+  if (alreadyPrinted(id)) {
     g_rxDups++;
     if (g_verbose) printTeleDup(t);
     return;
   }
-  g_rxPrintedMap |= pbit;
+  markPrinted(id);
 
   bool late = false;
   if (!g_rxMaxSet) {
@@ -263,7 +359,7 @@ static void handleTele(const Tele& t, uint32_t now) {
 
   g_rxMsgs++;
   if (t.copy) g_rxFirstNot0++;   // first arrival was copy>0: redundancy paid off
-  g_lastRxPulseMs = now;
+  g_lastTeleMs = now;
   printTele(t, late);
 }
 
@@ -565,6 +661,22 @@ static void pollSerial() {
 static uint32_t g_lastStatMs = 0;
 
 static void statMachine(uint32_t now) {
+  // stale-silence hint: a paired receiver hearing nothing for 10 s speaks up
+  // (both boards pinned rx, sender crashed/stream off, or link one-way-dead).
+  // Reference point = later of (re)pairing and last telemetry, so the hint
+  // also fires when no message has *ever* arrived.
+  static bool     wasPaired = false;
+  static uint32_t pairedAtMs = 0;
+  bool pr = e2e::paired();
+  if (pr && !wasPaired) pairedAtMs = now;
+  wasPaired = pr;
+  uint32_t ref = g_lastTeleMs > pairedAtMs ? g_lastTeleMs : pairedAtMs;
+  if (pr && effRole() == ROLE_RX && now - ref > 10000 &&
+      now - g_lastSilentHintMs >= 30000) {
+    g_lastSilentHintMs = now;
+    Serial.printf("note: paired but no telemetry for %lus - sender down, 'stream off' on the sender, or both boards pinned rx?\n",
+                  (unsigned long)((now - ref) / 1000));
+  }
   if (now - g_lastStatMs < 30000) return;
   g_lastStatMs = now;
   uint8_t er = effRole();
@@ -600,6 +712,7 @@ static void ledUpdate(uint32_t now) {
 // -------------------------------------------------------------- setup/loop
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
+  pinSetup();                       // all other header GPIOs as pulled-down inputs
   Serial.begin(BAUD);
   delay(200);
   loadCfg();
@@ -613,6 +726,8 @@ void setup() {
   Serial.printf("cfg: role=%s period=%lums copies=%u (redundancy) rate=%u phy, AES-CCM-128 + ARQ + CRC32\n",
                 roleName(g_role), (unsigned long)g_periodMs, (unsigned)g_copies,
                 (unsigned)e2e::phyRate());
+  Serial.printf("pins: %u gpio inputs reported (pull-down; 34-39 float when open), LED on gpio %u\n",
+                (unsigned)(sizeof kPins / sizeof kPins[0]), (unsigned)LED_BUILTIN);
   Serial.println("waiting for peer (both boards: same channel, same key) - type 'help'");
   g_lastStatMs = millis() - 28000;   // first [stat] line ~2 s after boot
 

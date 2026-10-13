@@ -51,11 +51,12 @@ Open both monitors at 115200. On pairing:
 
 - both print `LINK up peer=... fp=...`
 - the elected TX board silently streams (LED solid; anomalies print)
-- the RX board prints **one line per message** and pulses the LED:
+- the RX board prints **one line per message, exactly once**, and pulses the
+  LED:
 
 ```
-[rx] #1 copy0/3 up=0s heap=212980B "remote-control telemetry" crc=ok
-[rx] #2 copy0/3 up=0s heap=211234B "remote-control telemetry" crc=ok
+[rx] #1 copy0/3 up=0s heap=253424B pins=0x0000000005 "remote-control telemetry" crc=ok
+[rx] #2 copy0/3 up=0s heap=253424B pins=0x0000000005 "remote-control telemetry" crc=ok
 ...
 [stat] up=30s role=rx link=up | rx msgs=149 copies=447 dup=0 late=0 gaps=0 crcErr=0 | ...
 ```
@@ -63,6 +64,15 @@ Open both monitors at 115200. On pairing:
 `copy0/3` = delivered by the first of three copies; if you ever see
 `copy1/3` or `copy2/3` first, the redundancy just saved a retransmission
 (`firstNotCopy0` in `status` counts it).
+
+Two lines you may see and what they mean:
+
+- `note: paired but no telemetry for 10s - sender down, 'stream off' on the
+  sender, or both boards pinned rx?` — the link is up but nothing is
+  arriving; repeats every 30 s until traffic resumes.
+- `[rx] note: id went 146 -> 1, sender rebooted - resync window` — the
+  transmitter restarted mid-stream (its id counter reset); the receiver
+  resynchronizes and keeps printing every message exactly once.
 
 ## Serial commands
 
@@ -88,7 +98,28 @@ stream on|off | msg <text> | ping [n] | rate [name] | key <psk> | verbose | stop
 
 ```
 id:u32 | copy:u8 | copies:u8 | rsv:u8 | uptimeMs:u32 | heapFree:u32 |
-crc32:u32 (over the preceding 19 bytes) | text:char[45]
+pins:u64 | crc32:u32 (over the preceding 23 bytes) | text:char[37]
+```
+
+`pins` is a 40-bit GPIO bitmask captured at the sender — bit N = level of
+GPIO N. Reported pins (every GPIO the ESP-WROOM-32 exposes; 1/3 are the
+serial console and 6-11 are flash, so they are not touched):
+
+```
+0 2 4 5 12 13 14 15 16 17 18 19 21 22 23 25 26 27 32 33 34 35 36 39
+```
+
+At boot the sender configures all of them (except the LED on GPIO 2, whose
+bit reports the LED state) as pulled-down inputs, so unconnected pins read a
+stable 0 and a switch to 3V3 reads 1. Pins 34-39 are input-only with no
+internal pull — leave them unconnected and they read floating noise; tie
+them high/low if you want deterministic values. The receiver prints the raw
+mask in every `[rx]` line and a `pin change` transition list whenever levels
+shift between messages:
+
+```
+[rx] #42 copy0/3 up=8s heap=253028B pins=0x000010001005 "remote-control telemetry" crc=ok
+[rx] pin change: 4:0->1 35:1->0
 ```
 
 The engine retransmission regenerates frames deterministically from the
@@ -100,11 +131,11 @@ snapshot captured at message creation, so retries are byte-identical.
 `E2E_FRAME_MAX=250`, `E2E_PSK="..."`, `E2E_PHY_RATE=WIFI_PHY_RATE_1M_L`.
 Runtime overrides (NVS `e12`): `psk`, `rate`, `role`, `period`, `copies`.
 
-The vendored engine deliberately differs from 09's in five documented ways
+The vendored engine deliberately differs from 09's in six documented ways
 (see the banner in `src/e2e_link.h`): different wire magic (09 and 12 boards
 ignore each other), own NVS namespace, 1M default PHY rate, 8 s link
-timeout, and `setQuiet()` so the continuous stream does not spam per-session
-engine prints.
+timeout, `setQuiet()` so the continuous stream does not spam per-session
+engine prints, and a 250 ms paired HELLO cadence for fast re-pair.
 
 ## Long-distance tuning guide
 
@@ -121,7 +152,12 @@ engine prints.
 
 ## Verification
 
-See AGENTS.md in this folder for the current build/flash/soak results.
+55 minutes of automated soak across two runs (both boards, scheduled pings,
+messages, rate/period churn, mid-stream reboots of each board): **zero
+message loss** (`gaps=0 crcErr=0 drop=0`, no aborts, no link flaps, flat
+heap), and the soak caught two real bugs (a print-once collision and a
+dead sender-reboot threshold), both fixed. Full results and harness notes
+in AGENTS.md in this folder.
 
 ## Files
 
