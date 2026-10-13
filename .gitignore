@@ -16,3 +16,11 @@ _secrets/secrets.h
 *.swp
 *~
 .DS_Store
+
+# ------------------------------------------------- android build (project 10)
+# SDK path is machine-specific; build trees + gradle cache stay local.
+10ESPPhoneComms/android/local.properties
+10ESPPhoneComms/android/.gradle/
+10ESPPhoneComms/android/build/
+10ESPPhoneComms/android/app/build/
+

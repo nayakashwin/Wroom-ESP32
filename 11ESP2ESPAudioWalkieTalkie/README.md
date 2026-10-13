@@ -1,4 +1,4 @@
-# 10ESP2ESPAudioWalkieTalkie — encrypted ESP-NOW walkie-talkie (design)
+# 11ESP2ESPAudioWalkieTalkie — encrypted ESP-NOW walkie-talkie (design)
 
 **Status: design only — no code yet.** This folder documents the plan to turn
 the proven two-board encrypted link from
