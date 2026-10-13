@@ -1,6 +1,6 @@
 # ESP32 projects — NodeMCU ESP-32S (ESP-WROOM-32)
 
-Nine PlatformIO projects that build up from "connect to WiFi" to "read BLE
+Eleven PlatformIO projects that build up from "connect to WiFi" to "read BLE
 temperature sensors and answer questions in Telegram", plus one design-stage
 folder (`11ESP2ESPAudioWalkieTalkie`, documentation only). Each numbered folder
 is a complete, self-contained firmware; later projects reuse earlier ones.
@@ -109,6 +109,7 @@ itself and the boot banner appears on the monitor.
 | `09ESP2ESPCommunication` | — | encrypted point-to-point ESP-NOW link between **two ESP32s** (same firmware both): auto-pairing with a shared key, AES-CCM-128 encrypted, reliable bitmap-ACK transfer ≈ 1 Mbit/s, serial CLI (`tx`/`ping`/`msg`/`key`), full customization docs in its README. |
 | `10ESPPhoneComms` | — | phone-to-phone comms relay: Android app ↔ ESP32 over Bluetooth SPP, ESP32 ↔ ESP32 over the encrypted 09 ESP-NOW link. Text chat + **full-duplex hands-free voice** (µ-law 8 kHz, MUTE/SPEAKER toggles, proximity ear mode, auto-scroll chat) with sticky pairing that survives BT/ESP-NOW coexistence. App source in `android/`, built on this machine. |
 | `11ESP2ESPAudioWalkieTalkie` | — | **design doc only — no code yet.** plan to turn the 09 link into an encrypted voice walkie-talkie (I2S mic/amp, Codec2 1300 bps, PTT half-duplex): hardware BOM, wiring, codec comparison, latency budget, implementation steps. |
+| `12ESP2ESPRemoteControl` | — | long-range one-way telemetry stream: one ESP32 constantly streams messages to the other over the 09 encrypted ESP-NOW engine, tuned for reliability over speed — 1 Mbps PHY (max sensitivity), 3× redundancy copies per message, bitmap-ACK retransmission, per-message CRC32 + gap accounting; every received message printed to serial. Auto role election (or `role tx/rx`), `period`/`copies` runtime knobs. |
 
 Sensor MACs and labels for 07/08 are in each project's `src/main.cpp`
 (`kSensors[]`) — edit them to match the thermometers you own.
@@ -142,4 +143,5 @@ _secrets/secrets.example.h      committed template + instructions
 09ESP2ESPCommunication/         two-board encrypted ESP-NOW link
 10ESPPhoneComms/                phone↔ESP32↔ESP32↔phone BT + ESP-NOW relay
 11ESP2ESPAudioWalkieTalkie/     design docs: voice walkie-talkie on the 09 link
+12ESP2ESPRemoteControl/         long-range reliable one-way ESP-NOW telemetry
 ```
