@@ -26,10 +26,26 @@ window with dedup and **gap accounting** — so delivery is not just claimed,
 it is *measured* (`gaps=` should stay 0; a gap means all K copies plus all
 retransmissions failed over seconds).
 
-Airtime budget: 200 ms period × 3 copies × 82 B frames at 1 Mbps ≈ **0.5 %
-duty cycle** — enormous headroom for retransmissions, which is exactly the
-point. Goodput needed is ~2.6 kbit/s; the 1M link sustains ~700 kbit/s
-worst-case and ~1 Mbps typical.
+### Air rate & throughput (what actually crosses the air)
+
+- **PHY: 1 Mbps DSSS** (`WIFI_PHY_RATE_1M_L`, long preamble). Runtime
+  `rate 2m|5m5|11m` trades sensitivity for speed — but throughput on this
+  driver is nearly rate-independent anyway: the bottleneck is the ESP-NOW
+  send/ACK cycle, not the PHY.
+- **Cadence: 5 messages/s** — a 64-byte telemetry payload every 200 ms,
+  each sent `K = 3` times as 82-byte frames (64 B + 18 B engine header,
+  ≤ 250 B ESP-NOW limit).
+
+| what | rate |
+|---|---|
+| fresh data (after RX dedup) | 320 B/s ≈ **2.56 kbit/s** |
+| payload on air (K = 3 copies) | 960 B/s ≈ **7.7 kbit/s** + MAC/ACK overhead |
+| airtime duty cycle | **≈ 0.5 %** (measured) |
+
+That 0.5 % leaves enormous headroom for retransmissions — exactly the
+point of the design. The 1M link itself sustains ~700 kbit/s worst-case;
+every `TX DONE ... bytes=... ms=... rate=...Mbps` line reports the
+measured session truth.
 
 ## Wiring
 
@@ -78,7 +94,8 @@ Two lines you may see and what they mean:
 
 ```
 help | status | role [auto|tx|rx] | period [100..60000 ms] | copies [1..4] |
-stream on|off | msg <text> | ping [n] | rate [name] | key <psk> | verbose | stop
+stream on|off | msg <text> | ping [n] | rate [name] | key <psk> | verbose | stop |
+pins
 ```
 
 - `role` — show/pin the role; `auto` (default) = higher MAC transmits. Both
@@ -91,6 +108,8 @@ stream on|off | msg <text> | ping [n] | rate [name] | key <psk> | verbose | stop
   throughput at the cost of sensitivity.
 - `key` — change the PSK on both boards (NVS namespace `e12`, then reboots).
 - `verbose` — also print `[rx+]` lines for duplicate copies.
+- `pins` — one-shot local GPIO snapshot, e.g. `[local] pins=0x0000000005
+  up=42s` (the web monitor below polls this).
 
 ## Message format
 
@@ -150,6 +169,26 @@ engine prints, and a 250 ms paired HELLO cadence for fast re-pair.
    non-overlapping picks, but 12/13 see less WiFi in the 2.4 GHz band.
 5. Only if you must have throughput back: `rate 2m` / `5m5` / `11m`.
 
+## Web pin monitor
+
+`web/pinmon.py` bridges both serial ports to a browser dashboard with the
+NodeMCU V3 board drawn to scale, all 38 header pins labeled, and each of the
+24 tracked GPIOs lit green (1) / dark (0) live:
+
+```bash
+pio device list                 # confirm rx=/dev/ttyUSB0 tx=/dev/ttyUSB1
+python3 web/pinmon.py           # http://localhost:8080  (close other monitors!)
+python3 web/pinmon.py --rx /dev/ttyUSB0 --tx /dev/ttyUSB1 --port 8080
+```
+
+- **local** pins come from the `pins` command polled every 500 ms on each port.
+- **over-the-air** pins come from the receiver's `[rx] ... pins=` lines — what
+  actually crossed the air — shown next to the local value (`= local` / `≠
+  local`).
+- `pin change:` events (local diffs + OTA) stream into the event log.
+- Each port has exactly one owner: stop `pio device monitor` first, or the
+  server logs a serial error and keeps retrying.
+
 ## Verification
 
 55 minutes of automated soak across two runs (both boards, scheduled pings,
@@ -166,4 +205,6 @@ platformio.ini     env knobs (channel, PSK, PHY rate)
 src/e2e_link.h/.cpp vendored 09 engine (diffs documented in the banner)
 src/main.cpp       roles + election, telemetry generator, TX pacing,
                    RX dedup/gap accounting + serial output, CLI, WDT, LED
+web/pinmon.py      serial bridge + JSON API for the pin dashboard
+web/index.html     dashboard: NodeMCU V3 SVG with live pin states
 ```

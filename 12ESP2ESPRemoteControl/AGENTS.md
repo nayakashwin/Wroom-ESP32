@@ -75,6 +75,10 @@ pulse **EN only** (`setRTS(True)` 0.12 s → `False`, DTR released throughout).
   input-only/float). Verified live: bit 0 reads the boot-strap pull-up, and
   the RX `pin change: 2:0->1` line caught the TX LED going solid exactly
   when streaming started.
+- `pins` CLI command (2026-10-13): one-shot local snapshot
+  (`[local] pins=0x... up=Ns`), polled by the web monitor. Verified on both
+  boards: TX reads `0x5` (GPIO0 pull-up + GPIO2 LED solid while streaming),
+  RX reads `0x1`.
 - `ping 5` under stream load: 5/5, rtt 3–9 ms. `msg` reverse direction
   (rx→tx control channel) delivered (`[msg] from peer ...`).
 - Mid-stream RX reboot (EN pulse while streaming): TX session stalls, then
@@ -136,4 +140,9 @@ EN reboots of each board mid-stream).
 
 - `src/e2e_link.h` / `src/e2e_link.cpp` — vendored 09 engine (banner lists diffs)
 - `src/main.cpp` — app: roles/election, telemetry gen, TX pacing, RX dedup +
-  gap accounting + `[rx]` serial output, CLI, WDT, LED
+  gap accounting + `[rx]` serial output, CLI (`pins` included), WDT, LED
+- `web/pinmon.py` — stdlib HTTP + pyserial bridge: DTR/RTS discipline,
+  line-buffered readers (carry-over buffer — mid-chunk splits are a real
+  hazard), `pins` poller (0.5 s), `[rx]` OTA parser, `/api/state` JSON
+- `web/index.html` — dashboard: two NodeMCU-32 (38-pin) SVGs with live
+  per-GPIO pills/pads, OTA-vs-local comparison, event log; polls 500 ms

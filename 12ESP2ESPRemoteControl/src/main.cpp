@@ -20,6 +20,7 @@
 // Serial console (115200):
 //   help | status | role [auto|tx|rx] | period [ms] | copies [n] |
 //   stream on|off | msg <text> | ping [n] | rate [name] | key <psk> | verbose
+//   | pins
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
@@ -493,6 +494,7 @@ static void cmdHelp() {
   Serial.println("  key <psk>       set the pre-shared key (8..63 chars), save + reboot");
   Serial.println("  verbose         toggle printing duplicate copies as well");
   Serial.println("  stop            abort the running stream session");
+  Serial.println("  pins            local GPIO snapshot (the web monitor polls this)");
   Serial.println("  help            this list");
 }
 
@@ -547,6 +549,11 @@ static void handleLine(char* buf) {
 
   if (ciEq(cmd, "help") || ciEq(cmd, "?") || ciEq(cmd, "h")) { cmdHelp(); return; }
   if (ciEq(cmd, "status") || ciEq(cmd, "stat"))              { cmdStatus(); return; }
+  if (ciEq(cmd, "pins") || ciEq(cmd, "gpio")) {
+    Serial.printf("[local] pins=0x%010llX up=%lus\n",
+                  (unsigned long long)readPins(), (unsigned long)(millis() / 1000));
+    return;
+  }
 
   if (ciEq(cmd, "role")) {
     char* a = strtok(NULL, " \t");
