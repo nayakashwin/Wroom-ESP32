@@ -14,8 +14,11 @@
 //          distinct received message is printed to the serial monitor
 //
 // Roles: `auto` (default) elects the sender by MAC (higher MAC transmits),
-// or pin with `role tx` / `role rx` (persisted). The reverse direction stays
-// available for control: `msg <text>` and `ping` work from either board.
+// or pin with `role tx` / `role rx` (persisted). Hardware select at boot:
+// short GPIO21 to GND -> this board transmits, GPIO22 to GND -> receives
+// (both open = auto; a grounded strap beats the persisted value). The
+// reverse direction stays available for control: `msg <text>` and `ping`
+// work from either board.
 //
 // Serial console (115200):
 //   help | status | role [auto|tx|rx] | period [ms] | copies [n] |
@@ -41,6 +44,18 @@ static const size_t   CMDBUF_MAX    = 256;
 
 // ----------------------------------------------------------------- defaults
 enum Role : uint8_t { ROLE_AUTO = 0, ROLE_TX = 1, ROLE_RX = 2 };
+
+// Role straps - short to GND at boot (INPUT_PULLUP, grounded = LOW).
+// Genuinely non-analog pins with no boot-strap or flash function; each sits
+// next to a GND pin on the right header, so a 2-pin jumper does the job:
+//   GPIO21 -> GND : this board is the transmitter (tx)
+//   GPIO22 -> GND : this board is the receiver    (rx)
+//   both open     : auto (MAC election) / NVS `role`
+//   both grounded : invalid - warned, falls back to auto/NVS
+static const uint8_t PIN_STRAP_TX = 21;
+static const uint8_t PIN_STRAP_RX = 22;
+static uint8_t g_hwRole    = ROLE_AUTO;   // set by pinSetup() from the straps
+static bool    g_hwConflict = false;      // both straps grounded
 static const uint32_t DEF_PERIOD_MS = 200;    // one message every 200 ms
 static const uint8_t  DEF_COPIES    = 3;      // redundancy copies per message
 static const char     kTeleText[]   = "remote-control telemetry";
@@ -75,9 +90,16 @@ static const uint8_t kPins[] = {
 
 static void pinSetup() {
   for (uint8_t p : kPins) {
-    if (p == LED_BUILTIN) continue;               // driven as the LED
-    pinMode(p, p >= 34 ? INPUT : INPUT_PULLDOWN);  // unconnected pins read 0
+    if (p == LED_BUILTIN) continue;                // driven as the LED
+    if (p == PIN_STRAP_TX || p == PIN_STRAP_RX)
+      pinMode(p, INPUT_PULLUP);                    // role straps: open reads 1
+    else
+      pinMode(p, p >= 34 ? INPUT : INPUT_PULLDOWN); // unconnected pins read 0
   }
+  bool tx = digitalRead(PIN_STRAP_TX) == LOW;
+  bool rx = digitalRead(PIN_STRAP_RX) == LOW;
+  g_hwRole     = (tx != rx) ? (tx ? ROLE_TX : ROLE_RX) : ROLE_AUTO;
+  g_hwConflict = tx && rx;
 }
 
 static uint64_t readPins() {
@@ -484,7 +506,7 @@ static uint32_t takeNum(char* s, uint32_t def, uint32_t lo, uint32_t hi) {
 static void cmdHelp() {
   Serial.println("commands:");
   Serial.println("  status          link, roles, tx/rx delivery stats, counters");
-  Serial.println("  role [auto|tx|rx] show or pin the role (auto = higher MAC sends)");
+  Serial.println("  role [auto|tx|rx] show or pin the role (or strap GPIO21/22 to GND at boot)");
   Serial.println("  period [ms]     TX message period 100..60000 (default 200, saved)");
   Serial.println("  copies [n]      redundancy copies per message 1..4 (default 3, saved)");
   Serial.println("  stream on|off   start/stop the telemetry stream");
@@ -723,6 +745,12 @@ void setup() {
   Serial.begin(BAUD);
   delay(200);
   loadCfg();
+  if (g_hwConflict) {
+    Serial.printf("cfg: role straps GPIO%u and GPIO%u both shorted to GND - invalid, keeping auto/NVS\n",
+                  (unsigned)PIN_STRAP_TX, (unsigned)PIN_STRAP_RX);
+  } else if (g_hwRole != ROLE_AUTO) {
+    g_role = g_hwRole;             // grounded strap beats the persisted role
+  }
 
   bool ok = e2e::begin();
   e2e::setQuiet(true);          // the continuous stream must not spam TX/RX lines
@@ -730,8 +758,10 @@ void setup() {
 
   Serial.printf("\n12ESP2ESPRemoteControl online: long-range reliable esp-now telemetry%s\n",
                 ok ? "" : " INIT FAILED");
-  Serial.printf("cfg: role=%s period=%lums copies=%u (redundancy) rate=%u phy, AES-CCM-128 + ARQ + CRC32\n",
-                roleName(g_role), (unsigned long)g_periodMs, (unsigned)g_copies,
+  Serial.printf("cfg: role=%s%s period=%lums copies=%u (redundancy) rate=%u phy, AES-CCM-128 + ARQ + CRC32\n",
+                roleName(g_role),
+                g_hwRole != ROLE_AUTO ? " (strap)" : "",
+                (unsigned long)g_periodMs, (unsigned)g_copies,
                 (unsigned)e2e::phyRate());
   Serial.printf("pins: %u gpio inputs reported (pull-down; 34-39 float when open), LED on gpio %u\n",
                 (unsigned)(sizeof kPins / sizeof kPins[0]), (unsigned)LED_BUILTIN);

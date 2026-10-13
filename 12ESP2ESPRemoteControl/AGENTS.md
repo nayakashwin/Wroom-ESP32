@@ -15,7 +15,10 @@ Edit that file for shared rules — never duplicate them here.
   (default: one 64 B message every 200 ms, sent K=3 times) over the vendored
   09 encrypted ESP-NOW engine, tuned for long range: 1 Mbps PHY default,
   8 s link timeout, quiet engine prints. TX role elected by higher MAC
-  (`auto`) or pinned via NVS-backed `role tx|rx`. Receiver dedups by message
+  (`auto`), pinned via NVS-backed `role tx|rx`, or hardware-strapped at
+  boot: GPIO21→GND = tx, GPIO22→GND = rx (INPUT_PULLUP straps, grounded
+  beats NVS, both grounded warns and falls back; banner shows
+  `role=… (strap)`). Receiver dedups by message
   id, accounts gaps, prints **every distinct message** as `[rx] #id copyN/K
   ...` plus a `[stat]` line every 30 s. Serial CLI:
   `help | status | role | period | copies | stream on|off | msg | ping | rate

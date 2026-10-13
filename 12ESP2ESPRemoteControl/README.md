@@ -49,8 +49,11 @@ measured session truth.
 
 ## Wiring
 
-Two NodeMCU v3 (ESP-WROOM-32) boards, no external components. USB-UART
-bridges on `/dev/ttyUSB0` and `/dev/ttyUSB1`. For actual long-range use:
+Two NodeMCU v3 (ESP-WROOM-32) boards, no external components needed.
+Optional role straps: a 2-pin jumper from **GPIO21 to GND** makes that board
+the transmitter, **GPIO22 to GND** the receiver (both boards open keeps the
+MAC election). USB-UART bridges on `/dev/ttyUSB0` and `/dev/ttyUSB1`. For
+actual long-range use:
 the on-board PCB antenna is the limiting factor — a board with a proper
 external antenna on the same modulation goes much further.
 
@@ -100,6 +103,9 @@ pins
 
 - `role` — show/pin the role; `auto` (default) = higher MAC transmits. Both
   boards pinned `tx` is legal: they stream to each other simultaneously.
+  Hardware select at boot: **short GPIO21 to GND = tx**, **GPIO22 to GND =
+  rx** (both open = auto; a grounded strap beats the persisted value; both
+  grounded prints a warning and falls back). Strap first, then reset.
 - `period`, `copies` — stream cadence and redundancy factor (NVS-persisted).
 - `msg` — reliable text the *other* way (the control channel of the remote
   control): lands on the peer's serial as `[msg] from peer ...`.
@@ -130,9 +136,11 @@ serial console and 6-11 are flash, so they are not touched):
 
 At boot the sender configures all of them (except the LED on GPIO 2, whose
 bit reports the LED state) as pulled-down inputs, so unconnected pins read a
-stable 0 and a switch to 3V3 reads 1. Pins 34-39 are input-only with no
-internal pull — leave them unconnected and they read floating noise; tie
-them high/low if you want deterministic values. The receiver prints the raw
+stable 0 and a switch to 3V3 reads 1. GPIO 21/22 are the role straps and
+instead use the internal pull-up — open they read 1, grounded 0 (see
+Serial commands). Pins 34-39 are input-only with no internal pull — leave
+them unconnected and they read floating noise; tie them high/low if you
+want deterministic values. The receiver prints the raw
 mask in every `[rx]` line and a `pin change` transition list whenever levels
 shift between messages:
 
@@ -149,6 +157,7 @@ snapshot captured at message creation, so retries are byte-identical.
 `platformio.ini` build flags (both boards must match): `E2E_CHANNEL=6`,
 `E2E_FRAME_MAX=250`, `E2E_PSK="..."`, `E2E_PHY_RATE=WIFI_PHY_RATE_1M_L`.
 Runtime overrides (NVS `e12`): `psk`, `rate`, `role`, `period`, `copies`.
+Boot-time hardware role select: GPIO21/22 straps to GND (beat NVS).
 
 The vendored engine deliberately differs from 09's in six documented ways
 (see the banner in `src/e2e_link.h`): different wire magic (09 and 12 boards
@@ -197,6 +206,11 @@ message loss** (`gaps=0 crcErr=0 drop=0`, no aborts, no link flaps, flat
 heap), and the soak caught two real bugs (a print-once collision and a
 dead sender-reboot threshold), both fixed. Full results and harness notes
 in AGENTS.md in this folder.
+
+Role straps: verified with both straps open on both boards — boot banner
+shows `role=auto` and `pins` reports bits 21/22 = 1 (pull-up active).
+Ground GPIO21 (or GPIO22) and reset to select: the banner then reads
+`role=tx (strap)` (or `role=rx (strap)`).
 
 ## Files
 
