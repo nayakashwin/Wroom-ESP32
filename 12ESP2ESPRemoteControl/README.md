@@ -181,8 +181,11 @@ engine prints, and a 250 ms paired HELLO cadence for fast re-pair.
 ## Web pin monitor
 
 `web/pinmon.py` bridges both serial ports to a browser dashboard with the
-NodeMCU V3 board drawn to scale, all 38 header pins labeled, and each of the
-24 tracked GPIOs lit green (1) / dark (0) live:
+NodeMCU-32S board drawn to scale — all 38 header pins labeled with the
+colored function badges (RTC/ADC/TOUCH/JTAG/STRAP/...) transcribed from
+Waveshare's published pinout — each of the 24 tracked GPIOs lit green
+(1) / dark (0) live, plus analog chip strips for the 6 ADC1 channels
+(13 firmware: what the transmitter reads vs what arrives at the receiver):
 
 ```bash
 pio device list                 # confirm rx=/dev/ttyUSB0 tx=/dev/ttyUSB1
@@ -193,8 +196,21 @@ python3 web/pinmon.py --rx /dev/ttyUSB0 --tx /dev/ttyUSB1 --port 8080
 - **local** pins come from the `pins` command polled every 500 ms on each port.
 - **over-the-air** pins come from the receiver's `[rx] ... pins=` lines — what
   actually crossed the air — shown next to the local value (`= local` / `≠
-  local`).
-- `pin change:` events (local diffs + OTA) stream into the event log.
+  local`), and per-pin on the receiver's board: each of its pills is split
+  in half (left = the receiver's own read, right = the value received from
+  the transmitter, shown even when the receiver's port disagrees; an orange
+  ring on the right half marks the mismatch).
+- **analog** (13 firmware): the transmitter card shows its live `adc` reads
+  (6 ADC1 channels, value + volts + bar), the receiver card shows the values
+  received over the air with a per-channel delta badge (✓ = within 32 counts
+  of the transmitter's current read), and the OTA line gains `adc ≈ local`.
+  The receiver card also lists which tracked GPIOs arrived high and whether
+  they still match the transmitter now.
+- `pin change:` events (local diffs + OTA) stream into the event log; analog
+  jumps ≥ 128 counts are logged too (measured from the stream, so the
+  radio-coupled ±110 bounce that spams the firmware's own deadband-32
+  `adc change` lines stays out of the log — a slow drift still fires once it
+  accumulates 128).
 - Each port has exactly one owner: stop `pio device monitor` first, or the
   server logs a serial error and keeps retrying.
 
@@ -219,6 +235,8 @@ platformio.ini     env knobs (channel, PSK, PHY rate)
 src/e2e_link.h/.cpp vendored 09 engine (diffs documented in the banner)
 src/main.cpp       roles + election, telemetry generator, TX pacing,
                    RX dedup/gap accounting + serial output, CLI, WDT, LED
-web/pinmon.py      serial bridge + JSON API for the pin dashboard
-web/index.html     dashboard: NodeMCU V3 SVG with live pin states
+web/pinmon.py      serial bridge + JSON API: pins/adc poller, OTA parsing,
+                   analog-jump events, /api/state
+web/index.html     dashboard: NodeMCU V3 SVG with live pin states, function
+                   badges, analog strips + received-vs-local comparison
 ```

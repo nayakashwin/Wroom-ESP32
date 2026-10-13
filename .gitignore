@@ -16,6 +16,7 @@ _secrets/secrets.h
 *.swp
 *~
 .DS_Store
+__pycache__/
 
 # ------------------------------------------------- android build (project 10)
 # SDK path is machine-specific; build trees + gradle cache stay local.

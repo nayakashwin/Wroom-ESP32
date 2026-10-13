@@ -146,6 +146,17 @@ EN reboots of each board mid-stream).
   gap accounting + `[rx]` serial output, CLI (`pins` included), WDT, LED
 - `web/pinmon.py` — stdlib HTTP + pyserial bridge: DTR/RTS discipline,
   line-buffered readers (carry-over buffer — mid-chunk splits are a real
-  hazard), `pins` poller (0.5 s), `[rx]` OTA parser, `/api/state` JSON
-- `web/index.html` — dashboard: two NodeMCU-32 (38-pin) SVGs with live
-  per-GPIO pills/pads, OTA-vs-local comparison, event log; polls 500 ms
+  hazard), `pins` + `adc` poller (0.5 s), `[rx]` OTA parser (pins + the
+  6-channel ADC1 list, 12-firmware lines without `adc` tolerated),
+  analog-jump events at a 128-count threshold (13's radio-coupled ±110
+  bounce would otherwise flood the log — the firmware's own deadband-32
+  `adc change` lines are deliberately ignored), `/api/state` JSON
+- `web/index.html` — dashboard: two NodeMCU-32S (38-pin) SVGs with live
+  per-GPIO pills/pads (40-bit-safe bit test: JS `>>` wraps at 32, so
+  IO32+ need `bit()`, not `>>`), RX-card pills split in two halves (left =
+  receiver's read, right = transmitted value as received — orange ring on
+  mismatch, independent of the local port), header labels + colored
+  function badges transcribed from Waveshare's NodeMCU-32S pinout image
+  (OD/IE state badges omitted), OTA-vs-local comparison, analog chip strips
+  (TX live reads; received values + δ badges on the RX card), event log;
+  polls 150 ms

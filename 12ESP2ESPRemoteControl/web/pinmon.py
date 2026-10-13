@@ -2,9 +2,14 @@
 """ESP-NOW pin monitor: serial bridge + web UI for 12ESP2ESPRemoteControl.
 
 Reads both boards' serial ports (DTR/RTS discipline, EN untouched), polls the
-`pins` CLI command every 500 ms for each board's LOCAL GPIO snapshot, and
-passively parses the receiver's `[rx] ... pins=0x...` lines (transmitter's
-state as it actually arrives over the air) plus `[rx] pin change:` events.
+`pins` + `adc` CLI commands every 500 ms for each board's LOCAL GPIO and ADC1
+snapshots, and passively parses the receiver's `[rx] ... pins=0x... adc=...`
+lines (transmitter's state as it actually arrives over the air) plus
+`[rx] pin change:` events.  Analog events are computed here from the stream
+with a 128-count threshold (ADC_EVT_DELTA) so radio noise stays out of the
+log; the firmware's own deadband-32 `adc change` lines are ignored.
+Works with 12 firmware too - missing `adc` support is simply ignored (the
+old CLI prints ERR: unknown command).
 
 Serves:
   GET /            the dashboard (index.html next to this file)
@@ -23,13 +28,34 @@ import serial
 HERE = Path(__file__).resolve().parent
 
 RE_LOCAL = re.compile(r"\[local\] pins=0x([0-9A-Fa-f]+) up=(\d+)s")
-RE_RXLINE = re.compile(r"\[rx\] #(\d+) .*pins=0x([0-9A-Fa-f]+)")
+RE_LOCAL_ADC = re.compile(r"\[local\] adc=([0-9,:]+) up=(\d+)s")
+RE_RXLINE = re.compile(r"\[rx\] #(\d+) .*pins=0x([0-9A-Fa-f]+)(?: adc=([0-9,:]+))?")
 RE_RXCHANGE = re.compile(r"\[rx\] pin change: (.+)")
 RE_LINK = re.compile(r"\blink=(up|down)\b")
 RE_LINKUP = re.compile(r"LINK (up|down) ")
+ADC_PINS = (32, 33, 34, 35, 36, 39)   # ADC1 channels in firmware kAdcPins order
+ADC_EVT_DELTA = 128                   # log analog jumps >= 128 counts (~0.1 V):
+                                      # above the radio-coupled +-110 bounce that
+                                      # otherwise floods the log (firmware's own
+                                      # deadband-32 `adc change` lines are ignored),
+                                      # below any real pot movement; measured
+                                      # against the last LOGGED value, so a slow
+                                      # drift still fires once it accumulates
 KMASK = 0
 for _p in (0, 2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33, 34, 35, 36, 39):
     KMASK |= 1 << _p
+
+def parse_adc(s):
+    """'32:593,33:144,...' -> list in ADC_PINS order (None for missing)."""
+    vals = {}
+    for pair in s.split(","):
+        if ":" in pair:
+            k, v = pair.split(":", 1)
+            try:
+                vals[int(k)] = int(v)
+            except ValueError:
+                pass
+    return [vals.get(p) for p in ADC_PINS]
 
 class Board:
     def __init__(self, key, label, port):
@@ -38,7 +64,11 @@ class Board:
         self.pins = None            # local snapshot (int)
         self.local_t = 0.0
         self.uptime = None
+        self.adc = None             # local ADC1 snapshot, list in ADC_PINS order
+        self.adc_mark = None        # last locally LOGGED analog values
         self.ota_pins = None        # what the peer received over the air
+        self.ota_adc = None         # ...and its analog values
+        self.ota_mark = None        # last LOGGED ota analog values
         self.ota_id = None
         self.ota_t = 0.0
         self.link = "?"
@@ -54,11 +84,13 @@ class Board:
                 "label": self.label, "port": self.port,
                 "pins": self.pins,
                 "hex": None if self.pins is None else f"0x{self.pins:010X}",
+                "adc": self.adc,
                 "age_ms": None if not self.local_t else int((now - self.local_t) * 1000),
                 "uptime_s": self.uptime, "link": self.link, "err": self.err,
                 "lines": self.lines, "led_seq": self.led_seq,
                 "ota": None if self.ota_pins is None else {
                     "pins": self.ota_pins, "hex": f"0x{self.ota_pins:010X}",
+                    "adc": self.ota_adc,
                     "id": self.ota_id,
                     "age_ms": int((now - self.ota_t) * 1000)},
             }
@@ -89,6 +121,25 @@ def diff_pins(board, new, now):
         if changed >> b & 1:
             bits.append(f"IO{b} {old >> b & 1}->{new >> b & 1}")
     add_event(board.key, "local", " ".join(bits))
+
+def adc_jumps(mark, new):
+    """Advance a last-logged mark per channel; return jumps >= ADC_EVT_DELTA."""
+    bits = []
+    for i, (o, n) in enumerate(zip(mark, new)):
+        if o is None or n is None:
+            continue
+        if abs(n - o) >= ADC_EVT_DELTA:
+            bits.append(f"ADC{ADC_PINS[i]} {o}->{n}")
+            mark[i] = n              # baseline advances only when logged
+    return bits
+
+def diff_adc(board, new):
+    if board.adc_mark is None:
+        board.adc_mark = list(new)
+        return
+    bits = adc_jumps(board.adc_mark, new)
+    if bits:
+        add_event(board.key, "local", " ".join(bits))
 
 def reader(board):
     """Line-buffered reader: chunks may split lines mid-message (soak lesson)."""
@@ -134,15 +185,34 @@ def handle_line(board, line):
         else:
             board.prev = val
         return
+    m = RE_LOCAL_ADC.search(line)
+    if m:
+        vals = parse_adc(m.group(1))
+        with board.lock:
+            board.lines += 1
+            board.adc = vals
+            board.local_t = now
+            board.uptime = int(m.group(2))
+        diff_adc(board, vals)
+        return
     m = RE_RXLINE.search(line)
     if m:                                   # receiver saw the peer's telemetry
         b = BOARDS["tx"] if board.key == "rx" else BOARDS["rx"]
+        adc = parse_adc(m.group(3)) if m.group(3) else None
         with b.lock:
             b.ota_pins = int(m.group(2), 16)
+            b.ota_adc = adc
             b.ota_id = int(m.group(1))
             b.ota_t = now
         with board.lock:                    # this board's LED pulsed on reception
             board.led_seq += 1
+        if adc:                             # analog jumps, computed here (see
+            if b.ota_mark is None:          # ADC_EVT_DELTA - the firmware's own
+                b.ota_mark = list(adc)      # deadband-32 lines are too chatty)
+            else:
+                bits = adc_jumps(b.ota_mark, adc)
+                if bits:
+                    add_event(b.key, "ota", " ".join(bits))
         return
     m = RE_RXCHANGE.search(line)
     if m:
@@ -159,7 +229,7 @@ def poller():
         for b in BOARDS.values():
             try:
                 if b.ser and b.ser.is_open:
-                    b.ser.write(b"pins\n")
+                    b.ser.write(b"pins\nadc\n")
             except Exception:
                 pass
         time.sleep(0.5)

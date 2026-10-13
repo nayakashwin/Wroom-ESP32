@@ -25,7 +25,7 @@
   .dot.wait{background:var(--warn);box-shadow:0 0 7px var(--warn)}
   main{display:flex;flex-wrap:wrap;gap:18px;padding:18px 20px;justify-content:center}
   .card{background:var(--card);border:1px solid var(--edge);border-radius:14px;
-        padding:14px 16px 8px;flex:1 1 620px;max-width:700px;min-width:340px}
+        padding:14px 16px 8px;flex:1 1 620px;max-width:900px;min-width:340px}
   .card h2{margin:0 0 2px;font-size:15.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .card h2 .port{color:var(--dim);font-weight:400;font-size:12.5px;font-family:ui-monospace,monospace}
   .meta{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px;font-size:12.5px;color:var(--dim)}
@@ -35,12 +35,31 @@
        padding:6px 10px;margin:6px 0 2px;color:var(--dim)}
   .ota code{color:var(--hi);font-family:ui-monospace,monospace}
   .ota .mismatch{color:var(--warn)}
+  .ota:empty{display:none}
+  .strip{display:flex;gap:6px;flex-wrap:wrap;align-items:stretch;margin:6px 0 4px}
+  .strip .cap{font-size:12.5px;color:var(--dim);align-self:center;max-width:78px;line-height:1.25}
+  .achip{position:relative;flex:1 1 80px;min-width:74px;background:#0d1117;
+         border:1px solid var(--edge);border-radius:8px;padding:4px 8px 6px}
+  .achip .p{font:600 11px ui-monospace,Consolas,monospace;color:var(--dim)}
+  .achip .d{position:absolute;top:5px;right:8px;
+            font:700 11px ui-monospace,Consolas,monospace;color:var(--warn)}
+  .achip .d.ok{color:var(--hi)}
+  .achip .v{display:block;font:700 15px ui-monospace,Consolas,monospace;color:var(--txt)}
+  .achip .v small{font-size:10px;color:var(--dim);font-weight:600}
+  .achip .bar{display:block;height:4px;margin-top:4px;background:#21262d;
+              border-radius:2px;overflow:hidden}
+  .achip .bar i{display:block;height:100%;background:var(--accent);transition:width .15s}
+  .achip.na .v{color:var(--dim)}
   svg.board{display:block;width:100%;height:auto;max-height:74vh}
   .lbl{font:600 12.5px ui-monospace,Consolas,monospace;fill:var(--txt)}
   .lbl.dim{fill:var(--dim);font-weight:500}
-  .lbl.pwr{fill:#79c0ff}
-  .pill{font:700 12px ui-monospace,Consolas,monospace;fill:var(--dim)}
+  .lbl.gpio{fill:#43ab00}
+  .lbl.pwr{fill:#e5444b}
+  .lbl.gnd{fill:#c9d1d9}
+  .pill{font:700 10px ui-monospace,Consolas,monospace;fill:var(--dim)}
   .pill.hi{fill:#ffffff}
+  .bg{font:600 8.5px ui-monospace,Consolas,monospace}
+  .bang{font:700 13px ui-monospace,Consolas,monospace;fill:#ff3b3b}
   .pd{transition:fill .15s}
   #events{width:min(1420px,96vw);margin:2px auto 26px;background:var(--card);
           border:1px solid var(--edge);border-radius:14px;padding:12px 16px}
@@ -71,6 +90,7 @@
       <span id="age-tx">–</span>
     </div>
     <div class="ota" id="ota-tx">waiting for over-the-air telemetry…</div>
+    <div id="adc-tx"></div>
     <div id="svg-tx"></div>
   </section>
 
@@ -80,67 +100,136 @@
       <span>local <b id="m-rx">–</b></span><span>up <b id="u-rx">–</b></span>
       <span id="age-rx">–</span>
     </div>
-    <div class="ota" id="ota-rx">no incoming stream on this board (normal in one-way mode)</div>
+    <div class="ota" id="see-rx">waiting for telemetry from the transmitter…</div>
+    <div id="adc-rx"></div>
+    <div class="ota" id="ota-rx"></div>
     <div id="svg-rx"></div>
   </section>
 </main>
 
 <section id="events">
-  <h3>PIN CHANGE EVENTS — <span class="src">local = polled from the board itself ·
+  <h3>PIN &amp; ADC CHANGE EVENTS — <span class="src">local = polled from the board itself ·
   ota = observed in the receiver's telemetry stream</span></h3>
   <table><thead><tr><th style="width:90px">time</th><th style="width:110px">board</th>
   <th style="width:60px">source</th><th>change</th></tr></thead>
   <tbody id="evbody"><tr><td colspan="4" class="empty">none yet</td></tr></tbody></table>
 </section>
 
-<footer>poll: <code>pins</code> command every 500 ms · 24 tracked GPIOs
-(pulled-down inputs; 34–39 float when open) · close other serial monitors or the ports will conflict</footer>
+<footer>poll: <code>pins</code> + <code>adc</code> commands every 500 ms · 24 tracked GPIOs
+(pulled-down inputs; 34–39 float when open) + 6 ADC1 channels (12-bit 0..4095 ≈ 0–3.3 V) ·
+receiver pills split in half: left = receiver's own read, right = value received from the
+transmitter (orange ring = they disagree) · close other serial monitors or the ports will conflict</footer>
 
 <script>
-/* ---- 38-pin NodeMCU-32 / NodeMCU V3 header layout (USB at bottom).
-   k: g=gpio (tracked), pwr=power, uart=USB serial, fl=flash-reserved, ctrl=control */
+/* ---- 38-pin header transcribed from Waveshare's NodeMCU-32S pinout
+   (waveshare.com NodeMCU-32S-details-3.jpg), USB at bottom: plain GPIO   names plus the colored function badges, in the image's board->outer
+   order and legend colors. Gray OD/IE/WPU state badges are omitted, as
+   are the PWM squiggles.
+   k: g=gpio (tracked), fl=flash-reserved (not usable as GPIO), pwr, gnd,
+      ctrl;  f: [text, colorKey] badges inner->outer;  bang: shared with   flash, drawn as a red ! in the image */
+const BC = {   /* pill colors sampled from the pinout's legend */
+  rtc:  ['#3470c8','#fff'], adc:  ['#8800a8','#fff'], touch:['#c77231','#fff'],
+  oth:  ['#d5ad00','#fff'], dac:  ['#ffcc00','#111'], jtag: ['#80e6ff','#111'],
+  flash:['#cdabff','#111'], ardu: ['#8adfa8','#111'], ser:  ['#818181','#fff'],
+  strap:['#ff0066','#fff'],
+};
 const LEFT = [
   {t:'3V3',k:'pwr'}, {t:'EN',k:'ctrl'},
-  {t:'IO36/VP',k:'g',g:36}, {t:'IO39/VN',k:'g',g:39},
-  {t:'IO34',k:'g',g:34}, {t:'IO35',k:'g',g:35},
-  {t:'IO32',k:'g',g:32}, {t:'IO33',k:'g',g:33},
-  {t:'IO25',k:'g',g:25}, {t:'IO26',k:'g',g:26}, {t:'IO27',k:'g',g:27},
-  {t:'IO14',k:'g',g:14}, {t:'IO12',k:'g',g:12}, {t:'IO13',k:'g',g:13},
-  {t:'GND',k:'pwr'},
-  {t:'SD2/9',k:'fl'}, {t:'SD3/10',k:'fl'}, {t:'CMD/11',k:'fl'},
-  {t:'VIN',k:'pwr'},
+  {t:'GPIO36',k:'g',g:36,f:[['RTC','rtc'],['ADC1_0','adc'],['S_VP','oth']]},
+  {t:'GPIO39',k:'g',g:39,f:[['RTC','rtc'],['ADC1_3','adc'],['S_VN','oth']]},
+  {t:'GPIO34',k:'g',g:34,f:[['RTC','rtc'],['ADC1_6','adc'],['VDET_1','oth']]},
+  {t:'GPIO35',k:'g',g:35,f:[['RTC','rtc'],['ADC1_7','adc'],['VDET_2','oth']]},
+  {t:'GPIO32',k:'g',g:32,f:[['RTC','rtc'],['ADC1_4','adc'],['TOUCH9','touch'],['32K_XP','oth']]},
+  {t:'GPIO33',k:'g',g:33,f:[['RTC','rtc'],['ADC1_5','adc'],['TOUCH8','touch'],['32K_XN','oth']]},
+  {t:'GPIO25',k:'g',g:25,f:[['RTC','rtc'],['ADC1_8','adc'],['DAC_1','dac']]},
+  {t:'GPIO26',k:'g',g:26,f:[['RTC','rtc'],['ADC2_9','adc'],['DAC_2','dac']]},
+  {t:'GPIO27',k:'g',g:27,f:[['RTC','rtc'],['ADC2_7','adc'],['TOUCH7','touch']]},
+  {t:'GPIO14',k:'g',g:14,f:[['RTC','rtc'],['ADC2_6','adc'],['TOUCH6','touch'],['MTMS','jtag'],['HSPI_SCK','oth']]},
+  {t:'GPIO12',k:'g',g:12,f:[['RTC','rtc'],['ADC2_5','adc'],['TOUCH5','touch'],['MTDI','jtag'],['HSPI_MISO','oth'],['VDD_FLASH','strap']]},
+  {t:'GND',k:'gnd'},
+  {t:'GPIO13',k:'g',g:13,f:[['RTC','rtc'],['TOUCH4','touch'],['ADC2_4','adc'],['MTCK','jtag'],['HSPI_MOSI','oth']]},
+  {t:'GPIO9', k:'fl',f:[['D2','flash']],bang:1},
+  {t:'GPIO10',k:'fl',f:[['D3','flash']],bang:1},
+  {t:'GPIO11',k:'fl',f:[['CMD','flash']],bang:1},
+  {t:'5V0',k:'pwr'},
 ];
 const RIGHT = [
-  {t:'GND',k:'pwr'},
-  {t:'IO23',k:'g',g:23}, {t:'IO22',k:'g',g:22},
-  {t:'TXD',k:'uart'}, {t:'RXD',k:'uart'},
-  {t:'IO21',k:'g',g:21},
-  {t:'GND',k:'pwr'},
-  {t:'IO19',k:'g',g:19}, {t:'IO18',k:'g',g:18}, {t:'IO5',k:'g',g:5},
-  {t:'IO17',k:'g',g:17}, {t:'IO16',k:'g',g:16}, {t:'IO4',k:'g',g:4},
-  {t:'IO0',k:'g',g:0}, {t:'IO2',k:'g',g:2,led:true}, {t:'IO15',k:'g',g:15},
-  {t:'SD1/8',k:'fl'}, {t:'SD0/7',k:'fl'}, {t:'CLK/6',k:'fl'},
+  {t:'GND',k:'gnd'},
+  {t:'GPIO23',k:'g',g:23,f:[['VSPI_MOSI','oth'],['SPI_MOSI','ardu']]},
+  {t:'GPIO22',k:'g',g:22,f:[['WIRE_SCL','ardu']]},
+  {t:'GPIO1', k:'uart',f:[['U0TXD','ser'],['SERIAL_TX','ardu']]},
+  {t:'GPIO3', k:'uart',f:[['U0RXD','ser'],['SERIAL_RX','ardu']]},
+  {t:'GPIO21',k:'g',g:21,f:[['WIRE_SDA','ardu']]},
+  {t:'GND',k:'gnd'},
+  {t:'GPIO19',k:'g',g:19,f:[['VSPI_MISO','oth']]},
+  {t:'GPIO18',k:'g',g:18,f:[['VSPI_SCK','oth']]},
+  {t:'GPIO5', k:'g',g:5, f:[['VSPI_SS','oth'],['SDIO','strap']]},
+  {t:'GPIO17',k:'g',g:17},
+  {t:'GPIO16',k:'g',g:16},
+  {t:'GPIO4', k:'g',g:4, f:[['RTC','rtc'],['ADC2_0','adc'],['TOUCH0','touch']]},
+  {t:'GPIO0', k:'g',g:0, f:[['RTC','rtc'],['ADC2_1','adc'],['TOUCH1','touch'],['BOOT','strap']]},
+  {t:'GPIO2', k:'g',g:2,led:true,f:[['RTC','rtc'],['ADC2_2','adc'],['TOUCH2','touch']]},
+  {t:'GPIO15',k:'g',g:15,f:[['RTC','rtc'],['ADC2_3','adc'],['TOUCH3','touch'],['MTDO','jtag'],['HSPI_SS','oth'],['LOG','strap']]},
+  {t:'GPIO8',k:'fl',f:[['D1','flash']],bang:1},
+  {t:'GPIO7',k:'fl',f:[['D0','flash']],bang:1},
+  {t:'GPIO6',k:'fl',f:[['SCK','flash']],bang:1},
 ];
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')}
 const lastSeq = {tx:null, rx:null}, flashAt = {tx:0, rx:0};
+function bw(t){ return Math.ceil(t.length*5.1)+8 }          // badge pill width
+function badge(x, yTop, t, c){
+  const [bg,fg] = BC[c] || BC.oth, w = bw(t);
+  return `<rect x="${x}" y="${yTop}" width="${w}" height="11" rx="4" fill="${bg}"/>
+ <text class="bg" x="${x+w/2}" y="${yTop+9}" fill="${fg}" text-anchor="middle">${esc(t)}</text>`;
+}
 function pinRow(b, side, e, i, y){
   const g = e.k==='g';
-  const lx = side==='L' ? 150 : 490;                 // text anchor edge
-  const px = side==='L' ? 186 : 454;                 // pad center
-  const sx = side==='L' ? -1 : 1;                    // label direction
-  const cls = e.k==='pwr' ? 'pwr' : (g ? '' : 'dim');
-  const pillX = side==='L' ? 8 : 574;
-  const label = `<text class="lbl ${cls}" x="${lx}" y="${y+4}" text-anchor="${side==='L'?'end':'start'}">${esc(e.t)}</text>`;
+  const R = side!=='L';
+  const padX  = R ? 614 : 346;             // pad center
+  const nameX = R ? 642 : 306;             // name anchor edge (inner)
+  const cls = e.k==='pwr' ? 'pwr' : e.k==='gnd' ? 'gnd'
+            : (g || e.k==='fl' || e.k==='uart') ? 'gpio' : 'dim';
+  const lim = R ? (e.bang ? 904 : 912) : (e.bang ? 46 : 38);  // badge zone outer limit
+  /* badges flow outward from the name; the overflow spills to a second row   (row B, y+1) that also starts at the inner edge */
+  const A = []; const B = [];
+  let cur = R ? nameX + e.t.length*7.5 + 6 : nameX - e.t.length*7.5 - 6;
+  let spill = false;
+  for(const [t,c] of (e.f||[])){
+    const w = bw(t);
+    if(!spill && (R ? cur+w <= lim : cur-w >= lim)){
+      A.push([t,c,R?cur:cur-w]); cur += R ? w+3 : -(w+3);
+    }else{ spill = true; B.push([t,c]); }
+  }
+  const Bp = [];
+  let cb = nameX;
+  for(const [t,c] of B){ const w = bw(t); Bp.push([t,c,R?cb:cb-w]); cb += R ? w+3 : -(w+3); }
+  let badges = '';
+  A.forEach(([t,c,x]) => badges += badge(x, y-13, t, c));
+  Bp.forEach(([t,c,x]) => badges += badge(x, y+1,  t, c));
+  const label = `<text class="lbl ${cls}" x="${nameX}" y="${y-4}" text-anchor="${R?'start':'end'}">${esc(e.t)}</text>`;
   const pad = g
-    ? `<circle class="pd" data-b="${b}" data-g="${e.g}" cx="${px}" cy="${y}" r="7"/>`
-    : `<circle cx="${px}" cy="${y}" r="7" fill="#161b22" stroke="#3d444d" stroke-width="2"/>`;
-  const pill = g
-    ? `<rect x="${pillX}" y="${y-10}" width="34" height="20" rx="10" fill="${'#21262d'}" stroke="#30363d"/>
-       <text class="pill" data-b="${b}" data-g="${e.g}" x="${pillX+17}" y="${y+4}" text-anchor="middle">–</text>`
+    ? `<circle class="pd" data-b="${b}" data-g="${e.g}" cx="${padX}" cy="${y}" r="7"/>`
+    : `<circle cx="${padX}" cy="${y}" r="7" fill="#161b22" stroke="#3d444d" stroke-width="2"/>`;
+  const leader = `<line x1="${R?639:309}" y1="${y}" x2="${R?624:336}" y2="${y}" stroke="#30363d" stroke-width="1"/>`;
+  const bang = e.bang
+    ? `<text class="bang" x="${R?924:36}" y="${y+4}" text-anchor="${R?'end':'start'}">!</text>`
     : '';
-  const leader = `<line x1="${side==='L'?154:486}" y1="${y}" x2="${px + (side==='L'?-10:10)}" y2="${y}" stroke="#30363d" stroke-width="1"/>`;
-  return pad + leader + label + pill;
+  const pillX = R ? 926 : 4;
+  let pill = '';
+  if(g && b==='rx'){
+    /* split capsule: left half = receiver's own read, right half = the value
+       that crossed the air from the transmitter (shown even when the
+       receiver's port disagrees; setRecv rings the right half orange) */
+    pill = `<rect x="${pillX}" y="${y-10}" width="14" height="20" rx="7" fill="#21262d" stroke="#30363d"/>
+       <text class="pill" data-b="${b}" data-g="${e.g}" x="${pillX+7}" y="${y+4}" text-anchor="middle">–</text>
+       <rect x="${pillX+16}" y="${y-10}" width="14" height="20" rx="7" fill="#21262d" stroke="#30363d"/>
+       <text class="pill" data-b="${b}" data-r="${e.g}" x="${pillX+23}" y="${y+4}" text-anchor="middle">–</text>`;
+  }else if(g){
+    pill = `<rect x="${pillX}" y="${y-10}" width="30" height="20" rx="10" fill="#21262d" stroke="#30363d"/>
+       <text class="pill" data-b="${b}" data-g="${e.g}" x="${pillX+15}" y="${y+4}" text-anchor="middle">–</text>`;
+  }
+  return pad + leader + label + badges + bang + pill;
 }
 
 function renderBoard(b){
@@ -149,7 +238,7 @@ function renderBoard(b){
   LEFT .forEach((e,i)=>{ rows += pinRow(b,'L',e,i, y0+i*dy); });
   RIGHT.forEach((e,i)=>{ rows += pinRow(b,'R',e,i, y0+i*dy); });
   const svg = `
-<svg class="board" viewBox="0 0 640 668" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NodeMCU V3 board">
+<svg class="board" viewBox="0 0 960 668" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="NodeMCU-32S board">
   <defs>
     <linearGradient id="metal-${b}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#e6eaef"/><stop offset=".5" stop-color="#c6ccd4"/>
@@ -161,37 +250,37 @@ function renderBoard(b){
     </filter>
   </defs>
   <!-- PCB -->
-  <rect x="170" y="34" width="300" height="586" rx="16" fill="#14324e" stroke="#0a1a2b" stroke-width="3"/>
-  <rect x="176" y="40" width="288" height="574" rx="12" fill="none" stroke="#1d4468" stroke-width="1"/>
+  <rect x="330" y="34" width="300" height="586" rx="16" fill="#14324e" stroke="#0a1a2b" stroke-width="3"/>
+  <rect x="336" y="40" width="288" height="574" rx="12" fill="none" stroke="#1d4468" stroke-width="1"/>
   <!-- ESP-WROOM-32 module: antenna substrate + shield can -->
-  <rect x="212" y="52" width="216" height="252" rx="6" fill="#10151c" stroke="#2b3138"/>
+  <rect x="372" y="52" width="216" height="252" rx="6" fill="#10151c" stroke="#2b3138"/>
   <g stroke="#9aa2ac" stroke-width="3.5" fill="none" stroke-linecap="round">
-    <path d="M240 74 h160 M240 88 h160 M240 102 h160 M256 66 v44 M384 66 v44 M320 62 v52"/>
+    <path d="M400 74 h160 M400 88 h160 M400 102 h160 M416 66 v44 M544 66 v44 M480 62 v52"/>
   </g>
-  <text x="320" y="128" text-anchor="middle" fill="#6e7681" font-size="10" font-family="system-ui">2.4 GHz PCB antenna</text>
-  <rect x="216" y="138" width="208" height="158" rx="5" fill="url(#metal-${b})" stroke="#8c949e"/>
-  <text x="320" y="212" text-anchor="middle" fill="#24292f" font-size="17" font-weight="700"
+  <text x="480" y="128" text-anchor="middle" fill="#6e7681" font-size="10" font-family="system-ui">2.4 GHz PCB antenna</text>
+  <rect x="376" y="138" width="208" height="158" rx="5" fill="url(#metal-${b})" stroke="#8c949e"/>
+  <text x="480" y="212" text-anchor="middle" fill="#24292f" font-size="17" font-weight="700"
         font-family="system-ui,Consolas">ESP-WROOM-32</text>
-  <text x="320" y="234" text-anchor="middle" fill="#4b535d" font-size="10.5" font-family="system-ui">WiFi · Bluetooth · 4 MB flash</text>
+  <text x="480" y="234" text-anchor="middle" fill="#4b535d" font-size="10.5" font-family="system-ui">WiFi · Bluetooth · 4 MB flash</text>
   <!-- onboard LED (GPIO2), mid-board -->
-  <circle id="led-${b}" cx="320" cy="344" r="8" fill="#30363d" stroke="#484f58" stroke-width="1.5"/>
-  <text x="320" y="368" text-anchor="middle" fill="#6e7681" font-size="10.5" font-family="system-ui">LED · IO2</text>
+  <circle id="led-${b}" cx="480" cy="344" r="8" fill="#30363d" stroke="#484f58" stroke-width="1.5"/>
+  <text x="480" y="368" text-anchor="middle" fill="#6e7681" font-size="10.5" font-family="system-ui">LED · IO2</text>
   <!-- USB-UART chip + regulator -->
-  <rect x="296" y="520" width="56" height="34" rx="4" fill="#0b0f14" stroke="#3d444d"/>
-  <text x="324" y="541" text-anchor="middle" fill="#8b949e" font-size="10.5" font-family="system-ui">CP2102</text>
-  <rect x="216" y="524" width="44" height="24" rx="3" fill="#1c2128" stroke="#3d444d"/>
-  <text x="238" y="540" text-anchor="middle" fill="#6e7681" font-size="9" font-family="system-ui">3V3</text>
-  <!-- buttons: EN/RST left, FLASH (IO0) right -->
-  <rect x="196" y="566" width="52" height="24" rx="5" fill="#3a424c" stroke="#4d5560"/>
-  <text x="222" y="582" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="system-ui">RST</text>
-  <rect x="392" y="566" width="52" height="24" rx="5" fill="#3a424c" stroke="#4d5560"/>
-  <text x="418" y="582" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="system-ui">FLASH</text>
+  <rect x="456" y="520" width="56" height="34" rx="4" fill="#0b0f14" stroke="#3d444d"/>
+  <text x="484" y="541" text-anchor="middle" fill="#8b949e" font-size="10.5" font-family="system-ui">CP2102</text>
+  <rect x="376" y="524" width="44" height="24" rx="3" fill="#1c2128" stroke="#3d444d"/>
+  <text x="398" y="540" text-anchor="middle" fill="#6e7681" font-size="9" font-family="system-ui">3V3</text>
+  <!-- buttons: EN left, IO0 (boot) right - labels per Waveshare pinout -->
+  <rect x="356" y="566" width="52" height="24" rx="5" fill="#3a424c" stroke="#4d5560"/>
+  <text x="382" y="582" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="system-ui">EN</text>
+  <rect x="552" y="566" width="52" height="24" rx="5" fill="#3a424c" stroke="#4d5560"/>
+  <text x="578" y="582" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="system-ui">IO0</text>
   <!-- micro-USB -->
-  <rect x="284" y="596" width="72" height="36" rx="5" fill="#adb5bd" stroke="#6a737d" stroke-width="2"/>
-  <rect x="294" y="606" width="52" height="16" rx="7" fill="#495057"/>
+  <rect x="444" y="596" width="72" height="36" rx="5" fill="#adb5bd" stroke="#6a737d" stroke-width="2"/>
+  <rect x="454" y="606" width="52" height="16" rx="7" fill="#495057"/>
   <!-- silkscreen -->
-  <text x="196" y="500" fill="#5c7a99" font-size="11" font-weight="600" font-family="system-ui">NodeMCU V3</text>
-  <text x="384" y="500" text-anchor="end" fill="#5c7a99" font-size="10" font-family="system-ui">38-pin</text>
+  <text x="356" y="500" fill="#5c7a99" font-size="11" font-weight="600" font-family="system-ui">NodeMCU-32S</text>
+  <text x="544" y="500" text-anchor="end" fill="#5c7a99" font-size="10" font-family="system-ui">38-pin</text>
   ${rows}
 </svg>`;
   document.getElementById('svg-'+b).innerHTML = svg;
@@ -202,10 +291,37 @@ function fmtAge(ms){
   if(ms<1000) return ms+' ms ago';
   return (ms/1000).toFixed(1)+' s ago';
 }
+const ADCP = [32,33,34,35,36,39];          // ADC1 channels, firmware order
+const KPIN = [0,2,4,5,12,13,14,15,16,17,18,19,21,22,23,25,26,27,32,33,34,35,36,39];
+function bit(x, p){ return Math.floor(x / 2**p) % 2 }   // 40-bit safe: JS >> wraps at 32
+function volt(v){ return (v*3.3/4095).toFixed(2) }
+/* analog chip strip: 6 ADC1 channels as value + volts + fill bar; when a
+   reference list is given (the transmitter's own live reads) each chip gets
+   a delta badge - check = within the firmware's 32-count deadband */
+function renderA(id, cap, vals, ref){
+  const host = document.getElementById(id);
+  if(!host) return;
+  if(!vals){ host.innerHTML=''; return; }
+  const chips = vals.map((v,i)=>{
+    const p = ADCP[i];
+    if(v==null) return `<div class="achip na"><span class="p">IO${p}</span><span class="v">–</span></div>`;
+    let d='';
+    if(ref && ref[i]!=null){
+      const dd = v - ref[i];
+      d = Math.abs(dd) <= 32 ? '<span class="d ok">✓</span>'
+                             : `<span class="d">${dd>0?'+':''}${dd}</span>`;
+    }
+    return `<div class="achip" title="GPIO${p}: ${v}/4095 ≈ ${volt(v)} V">
+      <span class="p">IO${p}</span>${d}
+      <span class="v">${v}<small> · ${volt(v)}V</small></span>
+      <span class="bar"><i style="width:${(v*100/4095).toFixed(1)}%"></i></span></div>`;
+  }).join('');
+  host.innerHTML = `<div class="strip"><span class="cap">${cap}</span>${chips}</div>`;
+}
 function setPins(b, pins){
   document.querySelectorAll(`[data-b="${b}"][data-g]`).forEach(el=>{
     const g = +el.dataset.g;
-    const on = pins==null ? null : ((pins >> g) & 1);
+    const on = pins==null ? null : bit(pins, g);
     if(el.tagName==='circle'){
       el.setAttribute('fill', on ? '#2ea043' : '#484f58');
       if(on) el.setAttribute('filter', `url(#glow-${b})`);
@@ -215,6 +331,26 @@ function setPins(b, pins){
       el.classList.toggle('hi', on===1);
       const rect = el.previousElementSibling;
       if(rect) rect.setAttribute('fill', on ? '#2ea043' : '#21262d');
+    }
+  });
+}
+
+/* right half of every rx-card pill = the transmitter's value as it actually
+   arrived (boards.tx.ota), shown regardless of the receiver's own read;
+   an orange ring on the right half marks the two disagreeing */
+function setRecv(otaPins, localPins){
+  document.querySelectorAll('[data-b="rx"][data-r]').forEach(el=>{
+    const g = +el.dataset.r;
+    const v = otaPins==null ? null : bit(otaPins, g);
+    const l = localPins==null ? null : bit(localPins, g);
+    el.textContent = v==null ? '–' : v;
+    el.classList.toggle('hi', v===1);
+    const rect = el.previousElementSibling;
+    if(rect){
+      rect.setAttribute('fill', v ? '#2ea043' : '#21262d');
+      const diff = v!=null && l!=null && v!==l;
+      rect.setAttribute('stroke', diff ? '#d29922' : '#30363d');
+      rect.setAttribute('stroke-width', diff ? '1.5' : '1');
     }
   });
 }
@@ -272,11 +408,37 @@ async function tick(){
       const ota = document.getElementById('ota-'+k);
       if(b.ota){
         const same = b.pins==null || b.pins===b.ota.pins;
+        let ac = '';
+        if(b.ota.adc && b.adc && b.ota.adc.some(v=>v!=null)){
+          const bad = b.ota.adc.some((v,i)=> v!=null && b.adc[i]!=null &&
+                                            Math.abs(v-b.adc[i])>32);
+          ac = ` · adc <span class="${bad?'mismatch':''}">${bad?'≠ local':'≈ local'}</span>`;
+        }
         ota.innerHTML = `received over the air on the peer: <code>#${b.ota.id} ${b.ota.hex}</code>
           · ${fmtAge(b.ota.age_ms)}
-          <span class="${same?'':'mismatch'}">${same?'= local':'≠ local'}</span>`;
+          <span class="${same?'':'mismatch'}">${same?'= local':'≠ local'}</span>${ac}`;
+      }else if(k==='rx'){
+        ota.innerHTML = '';                // one-way mode: nothing addressed to rx
       }
+      if(k==='rx') setRecv(s.boards.tx?.ota?.pins ?? null, b.pins);
+      if(k==='tx') renderA('adc-tx', 'analog reads', b.adc, null);
     });
+    /* what the receiver actually got from the transmitter: digital state
+       (as it arrived) and analog values, each vs the TX's live reads */
+    const tx = s.boards.tx, see = document.getElementById('see-rx');
+    if(tx && tx.ota){
+      const hi   = KPIN.filter(p=>bit(tx.ota.pins, p));
+      const diff = tx.pins==null ? null : KPIN.filter(p=>bit(tx.ota.pins ^ tx.pins, p));
+      const cmp  = diff==null ? '' : diff.length
+        ? `<span class="mismatch">≠ transmitter now: ${diff.map(p=>'IO'+p).join(' ')}</span>`
+        : '<span>= transmitter now</span>';
+      see.innerHTML = `received from the transmitter: <code>#${tx.ota.id} ${tx.ota.hex}</code>
+        · ${fmtAge(tx.ota.age_ms)} · high ${hi.length?hi.map(p=>'IO'+p).join(' '):'none'} · ${cmp}`;
+      renderA('adc-rx', 'analog received', tx.ota.adc, tx.adc);
+    }else{
+      see.textContent = 'waiting for telemetry from the transmitter…';
+      renderA('adc-rx', 'analog received', null, null);
+    }
     renderEvents(s.events);
   }catch(e){
     document.getElementById('live').className = 'dot bad';
