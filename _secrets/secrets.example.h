@@ -8,7 +8,7 @@
 //
 // Every project that needs them includes the file like this (01Wifi,
 // 02TelegramTX, 03TelegramRX, 04TelegramRXTX, 06GPIOTelegram,
-// 08BlueToothTelegram):
+// 08BlueToothTelegram, 15ESPHJ1602ALCD16pinTemp):
 //
 //     #if !defined(__has_include) || !__has_include("secrets.h")
 //     #error "secrets.h not found - copy _secrets/secrets.example.h to _secrets/secrets.h and fill it in"
@@ -27,6 +27,7 @@
 //   04TelegramRXTX      + BOT_TOKEN, CHAT_ID
 //   06GPIOTelegram      + BOT_TOKEN, CHAT_ID
 //   08BlueToothTelegram + BOT_TOKEN, CHAT_ID
+//   15ESPHJ1602ALCD16pinTemp WIFI_SSID, WIFI_PASS
 //   05GPIO, 07BlueToothTempSensor - no secrets at all
 //
 #pragma once

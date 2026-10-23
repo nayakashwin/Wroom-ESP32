@@ -1,6 +1,6 @@
 # ESP32 projects — NodeMCU ESP-32S (ESP-WROOM-32)
 
-Eleven PlatformIO projects that build up from "connect to WiFi" to "read BLE
+Fourteen PlatformIO projects that build up from "connect to WiFi" to "read BLE
 temperature sensors and answer questions in Telegram", plus one design-stage
 folder (`11ESP2ESPAudioWalkieTalkie`, documentation only). Each numbered folder
 is a complete, self-contained firmware; later projects reuse earlier ones.
@@ -52,8 +52,8 @@ Fill in four values:
 
 | macro | used by | where to get it |
 |---|---|---|
-| `WIFI_SSID` | 01, 02, 03, 04, 06, 08 | your 2.4 GHz network name (the ESP32 has no 5 GHz radio) |
-| `WIFI_PASS` | 01, 02, 03, 04, 06, 08 | that network's password |
+| `WIFI_SSID` | 01, 02, 03, 04, 06, 08, 15 | your 2.4 GHz network name (the ESP32 has no 5 GHz radio) |
+| `WIFI_PASS` | 01, 02, 03, 04, 06, 08, 15 | that network's password |
 | `BOT_TOKEN` | 02, 03, 04, 06, 08 | Telegram → message **@BotFather** → `/newbot` → it replies with `123456789:AA...` |
 | `CHAT_ID` | 02, 04, 06, 08 | send your new bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser — your id is under `message` → `chat` → `id`. For a group/channel use the negative id, or the `@channelusername` |
 
@@ -110,6 +110,9 @@ itself and the boot banner appears on the monitor.
 | `10ESPPhoneComms` | — | phone-to-phone comms relay: Android app ↔ ESP32 over Bluetooth SPP, ESP32 ↔ ESP32 over the encrypted 09 ESP-NOW link. Text chat + **full-duplex hands-free voice** (µ-law 8 kHz, MUTE/SPEAKER toggles, proximity ear mode, auto-scroll chat) with sticky pairing that survives BT/ESP-NOW coexistence. App source in `android/`, built on this machine. |
 | `11ESP2ESPAudioWalkieTalkie` | — | **design doc only — no code yet.** plan to turn the 09 link into an encrypted voice walkie-talkie (I2S mic/amp, Codec2 1300 bps, PTT half-duplex): hardware BOM, wiring, codec comparison, latency budget, implementation steps. |
 | `12ESP2ESPRemoteControl` | — | long-range one-way telemetry stream: one ESP32 constantly streams messages to the other over the 09 encrypted ESP-NOW engine, tuned for reliability over speed — 1 Mbps PHY (max sensitivity), 3× redundancy copies per message, bitmap-ACK retransmission, per-message CRC32 + gap accounting; payload includes a 24-GPIO pin-status bitmask with change detection. Every received message printed to serial. Auto role election (or `role tx/rx`, or boot straps GPIO21/22 to GND), `period`/`copies` runtime knobs. `web/pinmon.py` bridges both serial ports to a browser dashboard with a 38-pin NodeMCU SVG and both boards' GPIO states live. |
+| `13ESP2ESPAnalogJoystick` | — | fork of 12 that adds ADC1 analog telemetry: a 6-channel ADC snapshot rides in the 76 B frame, `adc` serial CLI, deadband-filtered change lines — a two-pot joystick streaming position to the receiver. |
+| `14ESPHJ1602ALCD16pin` | — | displays text typed on the serial console on an HJ1602A 16×2 character LCD (4-bit parallel): short messages centred, long ones word-wrapped and scrolled line by line. |
+| `15ESPHJ1602ALCD16pinTemp` | `WIFI_*` | WiFi weather clock on the same 16×2 LCD: NTP time (America/Chicago) on row 0, Chesterfield MO temperature + humidity from Open-Meteo (no API key) on row 1, refreshed every 10 min. |
 
 Sensor MACs and labels for 07/08 are in each project's `src/main.cpp`
 (`kSensors[]`) — edit them to match the thermometers you own.
@@ -144,4 +147,7 @@ _secrets/secrets.example.h      committed template + instructions
 10ESPPhoneComms/                phone↔ESP32↔ESP32↔phone BT + ESP-NOW relay
 11ESP2ESPAudioWalkieTalkie/     design docs: voice walkie-talkie on the 09 link
 12ESP2ESPRemoteControl/         long-range reliable one-way ESP-NOW telemetry
+13ESP2ESPAnalogJoystick/        12 link + 6-channel analog joystick telemetry
+14ESPHJ1602ALCD16pin/           serial text → HJ1602A 16×2 LCD
+15ESPHJ1602ALCD16pinTemp/       WiFi weather clock on the 16×2 LCD
 ```
